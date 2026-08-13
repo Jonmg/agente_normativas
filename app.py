@@ -252,20 +252,53 @@ def leer_eml_bytes(datos: bytes) -> tuple:
     cabecera = (f"De: {msg.get('From', '')}\n"
                 f"Fecha: {msg.get('Date', '')}\n"
                 f"Asunto: {msg.get('Subject', '')}\n\n")
-    cuerpo = ""
+    cuerpo, cuerpo_html = "", ""
     adjuntos = []
     for parte in msg.walk():
         if parte.is_multipart():
             continue
         nombre_adj = parte.get_filename()
-        if nombre_adj:
+        # una imagen inline (logo de firma, tracking pixel) no es evidencia del
+        # proveedor: solo cuenta como adjunto lo que no sea imagen incrustada
+        if nombre_adj and not (parte.get_content_disposition() == "inline"
+                               and parte.get_content_maintype() == "image"):
             adjuntos.append((nombre_adj, parte.get_payload(decode=True) or b""))
-        elif parte.get_content_type() == "text/plain" and not cuerpo:
+            continue
+        if parte.get_content_type() == "text/plain" and not cuerpo:
             try:
                 cuerpo = parte.get_content()
             except Exception:
                 cuerpo = (parte.get_payload(decode=True) or b"").decode("utf-8", "replace")
+        elif parte.get_content_type() == "text/html" and not cuerpo_html:
+            try:
+                cuerpo_html = parte.get_content()
+            except Exception:
+                cuerpo_html = (parte.get_payload(decode=True) or b"").decode("utf-8", "replace")
+
+    if not cuerpo.strip() and cuerpo_html:
+        # correos solo-HTML (habitual en herramientas de mail-merge/CRM): no
+        # perder el contenido solo porque no traiga alternativa text/plain
+        t = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", cuerpo_html)
+        t = re.sub(r"(?i)<br\s*/?>", "\n", t)
+        t = re.sub(r"(?i)</(p|div|li|h[1-6])\s*>", "\n", t)
+        t = re.sub(r"(?s)<[^>]+>", " ", t)
+        t = html.unescape(t)
+        t = re.sub(r"[ \t]+", " ", t)
+        cuerpo = re.sub(r"\n{3,}", "\n\n", t).strip()
+
     return cabecera + cuerpo, adjuntos
+
+
+def _ruta_unica(directorio: Path, nombre: str) -> Path:
+    """Evita que dos ficheros con el mismo nombre subidos en la misma revisión
+    (o el adjunto de un .eml que se llama igual que otro) se pisen entre sí."""
+    ruta = directorio / nombre
+    base, ext = os.path.splitext(nombre)
+    i = 2
+    while ruta.exists():
+        ruta = directorio / f"{base}-{i}{ext}"
+        i += 1
+    return ruta
 
 
 def extraer_documentos(archivos: list, guardar_en: Path = None) -> list:
@@ -283,7 +316,7 @@ def extraer_documentos(archivos: list, guardar_en: Path = None) -> list:
             continue
         ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         if guardar_en:
-            (guardar_en / f"{ts}-{fs.filename}").write_bytes(datos)
+            _ruta_unica(guardar_en, f"{ts}-{fs.filename}").write_bytes(datos)
         if fs.filename.lower().endswith(".eml"):
             cuerpo, adjuntos = leer_eml_bytes(datos)
             documentos.append({"nombre": fs.filename, "texto": cuerpo})
@@ -291,7 +324,7 @@ def extraer_documentos(archivos: list, guardar_en: Path = None) -> list:
                 if not datos_adj:
                     continue
                 if guardar_en:
-                    (guardar_en / f"{ts}-{nombre_adj}").write_bytes(datos_adj)
+                    _ruta_unica(guardar_en, f"{ts}-{nombre_adj}").write_bytes(datos_adj)
                 documentos.append({"nombre": f"{fs.filename} · adjunto: {nombre_adj}",
                                    "texto": leer_subida_bytes(datos_adj, nombre_adj)})
         else:
@@ -406,7 +439,7 @@ def contexto_previo(turnos: list) -> str:
     piezas = []
     for t in turnos:
         if t.get("tipo") == "analisis":
-            nombres = ", ".join(t.get("documentos", [])) or t.get("documento", "")
+            nombres = _nombre_documentos(t)
             piezas.append(
                 f'<turno_anterior tipo="documento" nombre="{nombres}">\n'
                 f'Rol: {t.get("rol", "")}. Nota: {t.get("nota", "")}\n\n'
@@ -519,7 +552,7 @@ def analizar():
     if not documentos and not nota:
         return redirect(url_for("home"))
 
-    muestra = " ".join(d["texto"] for d in documentos)[:8000]
+    muestra = " ".join(d["texto"][:8000] for d in documentos)
     claves = elegir_fuentes(muestra, nota)
     ctx = montar_contexto(claves)
     prompt = prompt_analizar(ctx, "", documentos, rol, nota)
@@ -528,7 +561,7 @@ def analizar():
     guardar("analisis", {"documentos": nombres, "rol": rol,
                          "nota": nota, "fuentes": claves, "respuesta": resp})
     return render_template_string(PAGINA, vista="analisis", activa="consulta",
-                                  res={"titulo": ", ".join(nombres) or "Nota suelta",
+                                  res={"titulo": ", ".join(d["nombre"] for d in documentos) or "Nota suelta",
                                        "cuerpo": resp, "fuentes": claves},
                                   estado=estado_reglamento(), actualizado=fecha_actualizacion(),
                                   historial=historial())
@@ -635,7 +668,7 @@ def carpeta_analizar(slug):
         return redirect(url_for("carpeta_ver", slug=slug))
 
     hilo = contexto_previo(historial_carpeta(d))
-    muestra = " ".join(dd["texto"] for dd in documentos)[:8000]
+    muestra = " ".join(dd["texto"][:8000] for dd in documentos)
     claves = elegir_fuentes(muestra, nota)
     ctx = montar_contexto(claves)
     prompt = prompt_analizar(ctx, hilo, documentos, rol, nota)
@@ -653,6 +686,16 @@ def estado_reglamento():
     return f"{n} artículos · {a} anexos"
 
 
+def _nombre_documentos(d: dict) -> str:
+    """Texto a mostrar para un turno de tipo análisis: nombres de los documentos
+    subidos, el campo "documento" antiguo (JSON ya guardados antes de admitir
+    varios ficheros), o "Nota suelta" si de verdad no se subió nada."""
+    nombres = d.get("documentos")
+    if nombres:
+        return ", ".join(nombres)
+    return d.get("documento") or "Nota suelta"
+
+
 def historial():
     fs = sorted(SALIDAS.glob("*.json"), reverse=True)[:15]
     out = []
@@ -668,8 +711,7 @@ def historial():
         else:
             tipo = "consulta"
         out.append({"fecha": f.stem[:15].replace("-", " "), "tipo": tipo,
-                    "que": d.get("titulo") or d.get("pregunta")
-                          or ", ".join(d.get("documentos", [])) or d.get("documento", "")})
+                    "que": d.get("titulo") or d.get("pregunta") or _nombre_documentos(d)})
     return out
 
 

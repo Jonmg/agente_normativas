@@ -228,6 +228,24 @@ class TestCarpetas(unittest.TestCase):
         self.assertIn("certificado.txt", self.prompts[0])
         self.assertEqual(len(list(app.carpeta_dir(slug).glob("*.txt"))), 2)
 
+    def test_dos_ficheros_con_el_mismo_nombre_no_se_pisan(self):
+        import io
+        slug = self._crear_carpeta()
+        self.c.post(f"/carpetas/{slug}/analizar", data={
+            "documentos": [
+                (io.BytesIO(b"version original"), "declaracion.txt"),
+            ], "rol": "Envasador propio", "nota": "",
+        }, content_type="multipart/form-data")
+        self.c.post(f"/carpetas/{slug}/analizar", data={
+            "documentos": [
+                (io.BytesIO(b"version corregida"), "declaracion.txt"),
+            ], "rol": "Envasador propio", "nota": "",
+        }, content_type="multipart/form-data")
+        guardados = sorted(app.carpeta_dir(slug).glob("*declaracion*.txt"))
+        self.assertEqual(len(guardados), 2)
+        contenidos = {g.read_bytes() for g in guardados}
+        self.assertEqual(contenidos, {b"version original", b"version corregida"})
+
     def test_estado_por_defecto_al_crear(self):
         slug = self._crear_carpeta()
         r = self.c.get(f"/carpetas/{slug}")
@@ -323,6 +341,95 @@ class TestExtraccionDocumentos(unittest.TestCase):
         cuerpo, adjuntos = app.leer_eml_bytes(msg.as_bytes())
         self.assertIn("Solo texto.", cuerpo)
         self.assertEqual(adjuntos, [])
+
+    def test_eml_solo_html_recupera_el_cuerpo(self):
+        # correos de CRM/mail-merge que no traen alternativa text/plain: no
+        # perder el contenido solo porque venga como text/html
+        msg = EmailMessage()
+        msg["From"] = "crm@proveedor.com"
+        msg["Subject"] = "Sin alternativa de texto plano"
+        msg.set_content("<html><body><p>Declaramos conformidad con el <b>Anexo VII</b>.</p>"
+                        "<p>Segundo párrafo.</p></body></html>", subtype="html")
+        cuerpo, _ = app.leer_eml_bytes(msg.as_bytes())
+        # troceado simple, no CommonMark: basta con que el contenido sobreviva
+        # y no cuele HTML crudo, sin exigir un espaciado exacto
+        self.assertIn("Declaramos conformidad", cuerpo)
+        self.assertIn("Anexo VII", cuerpo)
+        self.assertIn("Segundo párrafo", cuerpo)
+        self.assertNotIn("<p>", cuerpo)
+        self.assertNotIn("<b>", cuerpo)
+
+    def test_eml_con_texto_plano_en_blanco_usa_el_html(self):
+        # habitual en CRM/mail-merge: la alternativa text/plain no está
+        # ausente, pero va vacía o solo con un espacio; el contenido real
+        # vive en text/html y no debe perderse
+        msg = EmailMessage()
+        msg["From"] = "crm@proveedor.com"
+        msg["Subject"] = "Alternativa de texto plano en blanco"
+        msg.set_content(" ")
+        msg.add_alternative("<html><body><p>Declaramos conformidad con el Anexo VII.</p>"
+                            "</body></html>", subtype="html")
+        cuerpo, _ = app.leer_eml_bytes(msg.as_bytes())
+        self.assertIn("Declaramos conformidad", cuerpo)
+        self.assertIn("Anexo VII", cuerpo)
+
+    def test_eml_ignora_imagen_inline_de_firma(self):
+        # un logo de firma o tracking pixel no es evidencia del proveedor
+        msg = EmailMessage()
+        msg["From"] = "proveedor@ejemplo.com"
+        msg["Subject"] = "Con firma corporativa"
+        msg.set_content("Cuerpo del mensaje.")
+        msg.add_attachment(b"\x89PNG...", maintype="image", subtype="png",
+                           filename="logo-firma.png", disposition="inline")
+        msg.add_attachment(b"contenido pdf", maintype="application", subtype="pdf",
+                           filename="ficha.pdf")
+        cuerpo, adjuntos = app.leer_eml_bytes(msg.as_bytes())
+        nombres = [a[0] for a in adjuntos]
+        self.assertNotIn("logo-firma.png", nombres)
+        self.assertIn("ficha.pdf", nombres)
+
+
+class TestRutaUnica(unittest.TestCase):
+    def test_evita_sobrescribir_ficheros_con_el_mismo_nombre(self):
+        import shutil
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        try:
+            r1 = app._ruta_unica(d, "20240101-120000-declaracion.pdf")
+            r1.write_bytes(b"primero")
+            r2 = app._ruta_unica(d, "20240101-120000-declaracion.pdf")
+            self.assertNotEqual(r1, r2)
+            r2.write_bytes(b"segundo")
+            self.assertEqual(r1.read_bytes(), b"primero")
+            self.assertEqual(r2.read_bytes(), b"segundo")
+        finally:
+            shutil.rmtree(d)
+
+
+class TestNombreDocumentos(unittest.TestCase):
+    def test_varios_documentos_unidos_por_coma(self):
+        self.assertEqual(app._nombre_documentos({"documentos": ["a.pdf", "b.pdf"]}), "a.pdf, b.pdf")
+
+    def test_documento_singular_heredado_de_json_antiguos(self):
+        self.assertEqual(app._nombre_documentos({"documento": "viejo.txt"}), "viejo.txt")
+
+    def test_sin_documentos_da_nota_suelta_en_vez_de_vacio(self):
+        self.assertEqual(app._nombre_documentos({"documentos": []}), "Nota suelta")
+        self.assertEqual(app._nombre_documentos({}), "Nota suelta")
+
+
+class TestMuestraParaElegirFuentes(unittest.TestCase):
+    def test_referencia_en_un_documento_posterior_no_se_pierde(self):
+        # antes, un primer documento largo agotaba los 8000 caracteres de
+        # muestra y la referencia del segundo documento nunca llegaba a
+        # elegir_fuentes()
+        relleno = "texto de relleno sin ninguna referencia normativa. " * 300
+        self.assertGreater(len(relleno), 8000)
+        documentos = [{"nombre": "a.txt", "texto": relleno},
+                     {"nombre": "b.txt", "texto": "Ver el anexo VII para más detalle."}]
+        muestra = " ".join(d["texto"][:8000] for d in documentos)
+        claves = app.elegir_fuentes(muestra)
+        self.assertIn("anexo-VII", claves)
 
 
 class TestTriaje(unittest.TestCase):
