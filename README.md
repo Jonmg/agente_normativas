@@ -79,11 +79,31 @@ El rol legal importa: Medop es importador en unas referencias, adquirente
 intracomunitario en otras y envasador propio en otras. Las obligaciones cambian.
 Por eso se pide en cada revisión en lugar de fijarlo una vez.
 
+**Triaje rápido** — antes de pedir nada a un proveedor: tipo de producto/envase,
+destinatario final y material. Sin subir ningún documento, una primera pasada para
+saber qué artículos aplican y si hay alguna exención conocida, útil para repasar
+muchas referencias antes de abrir una carpeta por caso.
+
 **Carpetas** — un caso o una duda con memoria de hilo entre turnos, como una
 conversación. Nombre libre (no hace falta que cuelgue de un proveedor: hay dudas
-puramente normativas). Cada pregunta o documento nuevo dentro de la carpeta recibe
-como contexto todo lo hablado antes en esa misma carpeta. El documento original que
-subas se guarda en `salidas/carpetas/<carpeta>/`, no solo el texto extraído.
+puramente normativas), con proveedor y **estado** opcionales (Abierta, Pendiente
+proveedor, En revisión interna, Conforme, No aplica) editables en cualquier momento.
+Cada pregunta o documento nuevo dentro de la carpeta recibe como contexto todo lo
+hablado antes en esa misma carpeta. El documento original que subas se guarda en
+`salidas/carpetas/<carpeta>/`, no solo el texto extraído.
+
+Se pueden subir **varios documentos a la vez** en una misma revisión (por ejemplo,
+un correo y su ficha adjunta), y un **.eml** se separa automáticamente en cuerpo del
+mensaje + un documento por cada adjunto, porque la evidencia suele estar en el
+adjunto y no en el texto del correo.
+
+El listado de carpetas (`/carpetas`) es el panel de seguimiento: se puede filtrar por
+texto o por estado, las carpetas abiertas van primero, ordenadas por antigüedad desde
+la última actividad (con aviso a partir de 3 días sin movimiento), y las cerradas
+(Conforme / No aplica) quedan al final.
+
+Cada respuesta lleva un botón "Copiar respuesta" para pegarla directamente en un
+correo al proveedor.
 
 Todo queda en `salidas/` como JSON con fecha, fuentes usadas y respuesta.
 Ninguna carpeta ni salida se versiona (`salidas/` está en `.gitignore`).
@@ -100,10 +120,12 @@ python -m unittest pruebas -v
 
 Cubre: selección de fuentes (`elegir_fuentes`), orden y recuento de
 artículos/anexos, el renderizador de markdown (incluida una prueba de que
-escapa HTML para evitar XSS), las rutas de la web, y el troceado por
-artículo de `preparar_reglamento.py` (el regex que separa "Artículo 12"
-como cabecera de una simple mención a "el artículo 12" dentro de un
-párrafo).
+escapa HTML para evitar XSS), las rutas de la web, estado/proveedor y filtrado
+del panel de seguimiento de carpetas, el parseo de `.eml` con adjuntos, la
+subida de varios documentos en una misma revisión, el triaje rápido, y el
+troceado por artículo de `preparar_reglamento.py` (el regex que separa
+"Artículo 12" como cabecera de una simple mención a "el artículo 12" dentro
+de un párrafo).
 
 ## Límites conocidos
 
@@ -120,5 +142,7 @@ párrafo).
 ## Siguiente
 
 - [ ] Cargar la Guía de la Comisión (2026) como segunda fuente junto al reglamento
-- [ ] Fichero de estado por proveedor, para no releer el histórico cada vez
-- [ ] Recordatorios de plazos de respuesta
+- [ ] Recordatorios de plazos de respuesta (más allá del aviso visual a partir de 3
+      días sin actividad en el listado de carpetas)
+- [ ] La extracción de texto de PDF (`pypdf`) no hace OCR: una ficha escaneada como
+      imagen no da texto. Si empieza a pasar con proveedores reales, valorar OCR.

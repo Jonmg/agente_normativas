@@ -26,16 +26,30 @@ Estas decisiones ya se tomaron y descartarlas silenciosamente rompe el diseño.
 
 ```
 preparar_reglamento.py   descarga EUR-Lex -> markdown troceado. Se ejecuta a mano.
-app.py                   Flask. Dos funciones: preguntar / revisar documento.
+app.py                   Flask. Preguntar / triaje rápido / revisar documento / carpetas.
 reglamento/00-INDICE.md  mapa tema -> artículo. SIEMPRE en contexto. Editable a mano.
 reglamento/articulos/    un .md por artículo
 reglamento/anexos/       un .md por anexo
 reglamento/considerandos.md  aparte. Interpretativos, no vinculantes.
-salidas/                 JSON de cada consulta y análisis. No versionado.
+salidas/                 JSON de cada consulta y análisis suelto. No versionado.
+salidas/carpetas/<slug>/ un caso: _carpeta.json (nombre, proveedor, estado) +
+                         un JSON por turno + los documentos originales subidos.
+pruebas.py               batería offline (unittest), sin red ni API real.
 ```
 
 `elegir_fuentes()` en `app.py` decide qué ficheros entran en contexto. Es la
 pieza sensible: si una respuesta sale coja, mirar ahí antes que en el prompt.
+
+`extraer_documentos()` convierte lo subido en un formulario en una lista de
+documentos de texto: separa un `.eml` en cuerpo + un documento por cada adjunto
+(la evidencia suele estar en el adjunto, no en el texto del correo), y admite
+varios ficheros a la vez en una misma revisión.
+
+El estado de una carpeta (`ESTADOS` en `app.py`) es un campo más de
+`_carpeta.json`, no una tabla nueva — sigue siendo "no base de datos". El
+listado de `/carpetas` es el panel de seguimiento: abiertas primero, ordenadas
+por antigüedad desde la última actividad; cerradas (Conforme / No aplica) al
+final.
 
 ## Reglas del dominio
 
@@ -71,15 +85,17 @@ y a cualquier texto que genere la herramienta.
 
 ## Estado y siguientes pasos
 
-- [ ] Validar `preparar_reglamento.py` contra el HTML real de EUR-Lex. Debe
-      detectar ~79 artículos; si salen menos de 60 avisa por stderr. El texto
-      crudo queda en `reglamento/_texto-plano.txt` para diagnosticar.
-- [ ] Ajustar el diccionario `TEMAS` del índice a los artículos reales. Ahora
-      está mapeado por estimación, sin haber visto el texto.
+Ya cargado: 71 artículos y 13 anexos reales (no la estimación inicial). Carpetas
+con estado/proveedor y panel de seguimiento, triaje rápido sin documento, subida
+de varios documentos y de `.eml` con adjuntos, botón de copiar respuesta.
+
 - [ ] Los anexos con tablas densas (Anexo II, cuadros de reciclabilidad) pierden
       formato al convertir. Revisar y decidir si merece un parser específico.
 - [ ] Añadir la Guía de la Comisión (2026) como segunda fuente junto al reglamento.
-- [ ] Fichero de estado por proveedor, para no releer el histórico cada vez.
+- [ ] Recordatorios de plazos de respuesta más allá del aviso visual a partir de
+      3 días sin actividad (constante a revisar si 3 días resulta ruidoso o poco).
+- [ ] `pypdf` no hace OCR: una ficha de proveedor escaneada como imagen no da
+      texto extraíble. Vigilar si empieza a pasar en la práctica.
 
 ## Seguridad
 

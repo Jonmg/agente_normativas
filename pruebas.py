@@ -10,7 +10,9 @@ entrada vacía, que redirige sin invocar el modelo.
     python -m unittest pruebas -v
 """
 import os
+import re
 import unittest
+from email.message import EmailMessage
 from pathlib import Path
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-ant-pruebas-sin-red")
@@ -133,8 +135,13 @@ class TestRutasWeb(unittest.TestCase):
         self.assertEqual(self.c.get("/normativa/no-existe").status_code, 302)
 
     def test_normativa_no_deja_pasar_html_crudo(self):
+        # la página en sí lleva un <script> legítimo (botón de copiar); lo que
+        # importa es que el contenido del artículo, ya pasado por
+        # markdown_a_html, no cuele HTML crudo sin escapar
         r = self.c.get("/normativa/art-001")
-        self.assertNotIn(b"<script>", r.data)
+        bloque = re.search(rb'<div class="md">(.*?)</div>\n</div>', r.data, re.S)
+        self.assertIsNotNone(bloque)
+        self.assertNotIn(b"<script>", bloque.group(1))
 
     def test_preguntar_vacio_redirige_sin_llamar_api(self):
         r = self.c.post("/preguntar", data={"pregunta": ""})
@@ -200,12 +207,61 @@ class TestCarpetas(unittest.TestCase):
         import io
         slug = self._crear_carpeta()
         self.c.post(f"/carpetas/{slug}/analizar", data={
-            "documento": (io.BytesIO(b"contenido de prueba"), "declaracion.txt"),
+            "documentos": (io.BytesIO(b"contenido de prueba"), "declaracion.txt"),
             "rol": "Envasador propio", "nota": "",
-        })
+        }, content_type="multipart/form-data")
         guardados = list(app.carpeta_dir(slug).glob("*.txt"))
         self.assertEqual(len(guardados), 1)
         self.assertEqual(guardados[0].read_bytes(), b"contenido de prueba")
+
+    def test_varios_documentos_en_una_sola_revision_entran_en_el_prompt(self):
+        import io
+        slug = self._crear_carpeta()
+        self.c.post(f"/carpetas/{slug}/analizar", data={
+            "documentos": [
+                (io.BytesIO(b"ficha tecnica"), "ficha.txt"),
+                (io.BytesIO(b"certificado material"), "certificado.txt"),
+            ],
+            "rol": "Envasador propio", "nota": "",
+        }, content_type="multipart/form-data")
+        self.assertIn("ficha.txt", self.prompts[0])
+        self.assertIn("certificado.txt", self.prompts[0])
+        self.assertEqual(len(list(app.carpeta_dir(slug).glob("*.txt"))), 2)
+
+    def test_estado_por_defecto_al_crear(self):
+        slug = self._crear_carpeta()
+        r = self.c.get(f"/carpetas/{slug}")
+        self.assertIn(b"Abierta", r.data)
+
+    def test_cambiar_estado_se_conserva(self):
+        slug = self._crear_carpeta()
+        self.c.post(f"/carpetas/{slug}/estado", data={"estado": "Conforme", "proveedor": "Acme"})
+        meta = app.leer_meta(app.carpeta_dir(slug))
+        self.assertEqual(meta["estado"], "Conforme")
+        self.assertEqual(meta["proveedor"], "Acme")
+
+    def test_estado_invalido_se_ignora(self):
+        slug = self._crear_carpeta()
+        self.c.post(f"/carpetas/{slug}/estado", data={"estado": "Inventado"})
+        meta = app.leer_meta(app.carpeta_dir(slug))
+        self.assertEqual(meta["estado"], app.ESTADOS[0])
+
+    def test_listar_carpetas_filtra_por_texto_y_estado(self):
+        self._crear_carpeta("Blíster proveedor Acme")
+        s2 = self._crear_carpeta("Caja proveedor Beta")
+        self.c.post(f"/carpetas/{s2}/estado", data={"estado": "Conforme"})
+
+        self.assertEqual(len(app.listar_carpetas(q="acme")), 1)
+        self.assertEqual(len(app.listar_carpetas(estado="Conforme")), 1)
+        self.assertEqual(len(app.listar_carpetas(q="no-existe")), 0)
+
+    def test_carpetas_cerradas_van_al_final_del_listado(self):
+        self._crear_carpeta("Caso abierto")
+        s2 = self._crear_carpeta("Caso cerrado")
+        self.c.post(f"/carpetas/{s2}/estado", data={"estado": "Conforme"})
+        listado = app.listar_carpetas()
+        self.assertFalse(listado[0]["cerrada"])
+        self.assertTrue(listado[-1]["cerrada"])
 
     def test_pregunta_vacia_no_llama_al_modelo(self):
         slug = self._crear_carpeta()
@@ -219,6 +275,77 @@ class TestCarpetas(unittest.TestCase):
     def test_slug_con_caracteres_invalidos_no_se_acepta(self):
         self.assertIsNone(app.carpeta_dir("../../etc"))
         self.assertIsNone(app.carpeta_dir("con espacios"))
+
+    def test_eml_con_adjunto_entra_como_dos_documentos_en_el_prompt(self):
+        import io
+        msg = EmailMessage()
+        msg["From"] = "proveedor@ejemplo.com"
+        msg["Subject"] = "Ficha técnica del blíster"
+        msg.set_content("Adjunto la ficha solicitada.")
+        msg.add_attachment(b"contenido de la ficha", maintype="text", subtype="plain",
+                           filename="ficha.txt")
+
+        slug = self._crear_carpeta()
+        self.c.post(f"/carpetas/{slug}/analizar", data={
+            "documentos": (io.BytesIO(msg.as_bytes()), "correo.eml"),
+            "rol": "Envasador propio", "nota": "",
+        }, content_type="multipart/form-data")
+
+        self.assertIn("Adjunto la ficha solicitada.", self.prompts[0])
+        self.assertIn("contenido de la ficha", self.prompts[0])
+        self.assertIn("ficha.txt", self.prompts[0])
+        # el .eml original y el adjunto suelto quedan guardados en la carpeta
+        d = app.carpeta_dir(slug)
+        self.assertEqual(len(list(d.glob("*.eml"))), 1)
+        self.assertEqual(len(list(d.glob("*ficha.txt"))), 1)
+
+
+class TestExtraccionDocumentos(unittest.TestCase):
+    def test_leer_eml_separa_cuerpo_y_adjunto(self):
+        msg = EmailMessage()
+        msg["From"] = "proveedor@ejemplo.com"
+        msg["Subject"] = "Asunto de prueba"
+        msg.set_content("Cuerpo del correo.")
+        msg.add_attachment(b"datos binarios", maintype="application", subtype="octet-stream",
+                           filename="certificado.pdf")
+
+        cuerpo, adjuntos = app.leer_eml_bytes(msg.as_bytes())
+        self.assertIn("Cuerpo del correo.", cuerpo)
+        self.assertIn("proveedor@ejemplo.com", cuerpo)
+        self.assertEqual([a[0] for a in adjuntos], ["certificado.pdf"])
+        self.assertEqual(adjuntos[0][1], b"datos binarios")
+
+    def test_eml_sin_adjuntos(self):
+        msg = EmailMessage()
+        msg["From"] = "a@b.com"
+        msg["Subject"] = "Sin adjuntos"
+        msg.set_content("Solo texto.")
+        cuerpo, adjuntos = app.leer_eml_bytes(msg.as_bytes())
+        self.assertIn("Solo texto.", cuerpo)
+        self.assertEqual(adjuntos, [])
+
+
+class TestTriaje(unittest.TestCase):
+    def setUp(self):
+        app.app.testing = True
+        self.c = app.app.test_client()
+        self._llamar_original = app.llamar
+        app.llamar = lambda system, prompt, max_tokens=3000: "respuesta simulada de triaje"
+
+    def tearDown(self):
+        app.llamar = self._llamar_original
+
+    def test_triaje_sin_tipo_producto_redirige_sin_llamar_api(self):
+        r = self.c.post("/triaje", data={"tipo_producto": ""})
+        self.assertEqual(r.status_code, 302)
+
+    def test_triaje_devuelve_respuesta(self):
+        r = self.c.post("/triaje", data={
+            "tipo_producto": "Estuche de cartón para gafas",
+            "destinatario": "Consumidor final", "material": "Cartón",
+        })
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(b"respuesta simulada de triaje", r.data)
 
 
 class TestTroceadoReglamento(unittest.TestCase):

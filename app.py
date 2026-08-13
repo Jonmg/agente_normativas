@@ -20,6 +20,8 @@ import json
 import html
 import datetime
 import unicodedata
+from email import message_from_bytes
+from email.policy import default as politica_email
 from pathlib import Path
 
 from flask import Flask, request, render_template_string, redirect, url_for
@@ -241,29 +243,83 @@ def leer_subida_bytes(datos: bytes, nombre: str) -> str:
     return datos.decode("utf-8", "replace")
 
 
-def leer_subida(fs) -> str:
-    return leer_subida_bytes(fs.read(), fs.filename)
+def leer_eml_bytes(datos: bytes) -> tuple:
+    """Separa un .eml en (cuerpo, [(nombre_adjunto, bytes), ...]). Los adjuntos se
+    devuelven aparte para poder pasarlos por leer_subida_bytes cada uno según su
+    propio tipo (un correo con una ficha PDF adjunta trae la evidencia en el PDF,
+    no en el texto del mensaje)."""
+    msg = message_from_bytes(datos, policy=politica_email)
+    cabecera = (f"De: {msg.get('From', '')}\n"
+                f"Fecha: {msg.get('Date', '')}\n"
+                f"Asunto: {msg.get('Subject', '')}\n\n")
+    cuerpo = ""
+    adjuntos = []
+    for parte in msg.walk():
+        if parte.is_multipart():
+            continue
+        nombre_adj = parte.get_filename()
+        if nombre_adj:
+            adjuntos.append((nombre_adj, parte.get_payload(decode=True) or b""))
+        elif parte.get_content_type() == "text/plain" and not cuerpo:
+            try:
+                cuerpo = parte.get_content()
+            except Exception:
+                cuerpo = (parte.get_payload(decode=True) or b"").decode("utf-8", "replace")
+    return cabecera + cuerpo, adjuntos
 
 
-def prompt_analizar(ctx: str, hilo: str, texto: str, nombre: str, rol: str, nota: str) -> str:
+def extraer_documentos(archivos: list, guardar_en: Path = None) -> list:
+    """A partir de los ficheros subidos en un formulario, devuelve una lista de
+    documentos [{'nombre', 'texto'}]. Un .eml se separa en cuerpo + un documento
+    por cada adjunto, porque cada uno puede aportar evidencia distinta. Si se pasa
+    guardar_en, el original (y los adjuntos de un .eml) se guardan ahí para que la
+    afirmación del proveedor quede siempre respaldada por el fichero fuente."""
+    documentos = []
+    for fs in archivos:
+        if not fs or not fs.filename:
+            continue
+        datos = fs.read()
+        if not datos:
+            continue
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        if guardar_en:
+            (guardar_en / f"{ts}-{fs.filename}").write_bytes(datos)
+        if fs.filename.lower().endswith(".eml"):
+            cuerpo, adjuntos = leer_eml_bytes(datos)
+            documentos.append({"nombre": fs.filename, "texto": cuerpo})
+            for nombre_adj, datos_adj in adjuntos:
+                if not datos_adj:
+                    continue
+                if guardar_en:
+                    (guardar_en / f"{ts}-{nombre_adj}").write_bytes(datos_adj)
+                documentos.append({"nombre": f"{fs.filename} · adjunto: {nombre_adj}",
+                                   "texto": leer_subida_bytes(datos_adj, nombre_adj)})
+        else:
+            documentos.append({"nombre": fs.filename, "texto": leer_subida_bytes(datos, fs.filename)})
+    return documentos
+
+
+def prompt_analizar(ctx: str, hilo: str, documentos: list, rol: str, nota: str) -> str:
+    bloques = "\n\n".join(
+        f'<documento nombre="{d["nombre"]}">\n{d["texto"][:60000]}\n</documento>'
+        for d in documentos)
     return f"""{hilo}{ctx}
 
-<documento nombre="{nombre}">
-{texto}
-</documento>
+{bloques}
 
 <contexto_empresa>
 Rol legal para esta referencia: {rol}
 Nota de quien lo sube: {nota or "ninguna"}
 </contexto_empresa>
 
-Analiza el documento contra el reglamento y devuelve, en este orden:
+Analiza el/los documento(s) contra el reglamento y devuelve, en este orden:
 
-1. QUÉ ES — una línea: qué documento es y de quién.
-2. QUÉ APORTA — evidencias que sí cubre, con el artículo que satisface cada una.
+1. QUÉ ES — una línea por documento: qué es y de quién.
+2. QUÉ APORTA — evidencias que sí cubre, con el artículo que satisface cada una y de
+   qué documento sale cada una (si hay más de uno).
 3. QUÉ FALTA — tabla: requisito | artículo | por qué falta | qué pedir exactamente.
-4. QUÉ NO CUADRA — afirmaciones sin respaldo documental, contradicciones o exenciones
-   invocadas sin justificación.
+4. QUÉ NO CUADRA — afirmaciones sin respaldo documental, contradicciones entre los
+   documentos, o exenciones invocadas sin justificación.
 5. SIGUIENTE PASO — borrador de la respuesta al proveedor, listo para copiar, pidiendo
    solo lo del punto 3.
 """
@@ -284,6 +340,10 @@ def guardar(tipo: str, payload: dict) -> str:
 # en .gitignore), porque sin él no hay con qué respaldar después una
 # afirmación de proveedor.
 # --------------------------------------------------------------------------
+ESTADOS = ["Abierta", "Pendiente proveedor", "En revisión interna", "Conforme", "No aplica"]
+ESTADOS_CERRADOS = {"Conforme", "No aplica"}
+
+
 def _slug_carpeta(nombre: str) -> str:
     s = unicodedata.normalize("NFKD", nombre).encode("ascii", "ignore").decode()
     s = re.sub(r"[^\w\s-]", "", s).strip().lower()
@@ -291,7 +351,7 @@ def _slug_carpeta(nombre: str) -> str:
     return s or "carpeta"
 
 
-def crear_carpeta(nombre: str) -> str:
+def crear_carpeta(nombre: str, proveedor: str = "") -> str:
     base = _slug_carpeta(nombre)
     slug, i = base, 2
     while (CARPETAS / slug).exists():
@@ -300,7 +360,7 @@ def crear_carpeta(nombre: str) -> str:
     d = CARPETAS / slug
     d.mkdir(parents=True)
     (d / "_carpeta.json").write_text(
-        json.dumps({"nombre": nombre,
+        json.dumps({"nombre": nombre, "proveedor": proveedor.strip(), "estado": ESTADOS[0],
                     "creada": datetime.datetime.now().isoformat(timespec="seconds")},
                    ensure_ascii=False, indent=2), encoding="utf-8")
     return slug
@@ -311,6 +371,21 @@ def carpeta_dir(slug: str):
         return None
     d = CARPETAS / slug
     return d if (d / "_carpeta.json").exists() else None
+
+
+def leer_meta(d: Path) -> dict:
+    meta = json.loads((d / "_carpeta.json").read_text(encoding="utf-8"))
+    meta.setdefault("proveedor", "")
+    meta.setdefault("estado", ESTADOS[0])
+    return meta
+
+
+def actualizar_meta(d: Path, **campos) -> dict:
+    meta = leer_meta(d)
+    meta.update(campos)
+    (d / "_carpeta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return meta
 
 
 def historial_carpeta(d: Path) -> list:
@@ -331,8 +406,9 @@ def contexto_previo(turnos: list) -> str:
     piezas = []
     for t in turnos:
         if t.get("tipo") == "analisis":
+            nombres = ", ".join(t.get("documentos", [])) or t.get("documento", "")
             piezas.append(
-                f'<turno_anterior tipo="documento" nombre="{t.get("documento", "")}">\n'
+                f'<turno_anterior tipo="documento" nombre="{nombres}">\n'
                 f'Rol: {t.get("rol", "")}. Nota: {t.get("nota", "")}\n\n'
                 f'{t.get("respuesta", "")}\n</turno_anterior>')
         else:
@@ -350,21 +426,36 @@ def guardar_turno(d: Path, tipo: str, payload: dict) -> str:
     return ts
 
 
-def listar_carpetas() -> list:
+def listar_carpetas(q: str = "", estado: str = "") -> list:
     out = []
+    ahora = datetime.datetime.now()
     for d in sorted(CARPETAS.iterdir()) if CARPETAS.exists() else []:
         meta_f = d / "_carpeta.json"
         if not d.is_dir() or not meta_f.exists():
             continue
         try:
-            meta = json.loads(meta_f.read_text(encoding="utf-8"))
+            meta = leer_meta(d)
         except Exception:
             continue
         turnos = historial_carpeta(d)
         ultima = max([t.get("fecha", "") for t in turnos], default=meta.get("creada", ""))
+        try:
+            dias = (ahora - datetime.datetime.fromisoformat(ultima)).days
+        except ValueError:
+            dias = None
         out.append({"slug": d.name, "nombre": meta.get("nombre", d.name),
-                    "turnos": len(turnos), "ultima": ultima[:16].replace("T", " ")})
-    out.sort(key=lambda x: x["ultima"], reverse=True)
+                    "proveedor": meta.get("proveedor", ""), "estado": meta.get("estado", ESTADOS[0]),
+                    "cerrada": meta.get("estado") in ESTADOS_CERRADOS,
+                    "turnos": len(turnos), "dias": dias,
+                    "ultima": ultima[:16].replace("T", " ")})
+
+    if q:
+        ql = q.lower()
+        out = [c for c in out if ql in c["nombre"].lower() or ql in c["proveedor"].lower()]
+    if estado:
+        out = [c for c in out if c["estado"] == estado]
+
+    out.sort(key=lambda x: (x["cerrada"], -(x["dias"] if x["dias"] is not None else 0)))
     return out
 
 
@@ -393,24 +484,51 @@ def preguntar():
                                   historial=historial())
 
 
+@app.route("/triaje", methods=["POST"])
+def triaje():
+    tipo_producto = request.form.get("tipo_producto", "").strip()
+    destinatario = request.form.get("destinatario", "").strip()
+    material = request.form.get("material", "").strip()
+    if not tipo_producto:
+        return redirect(url_for("home"))
+
+    pregunta = (
+        "Triaje rápido de aplicabilidad, sin documento de proveedor todavía: "
+        f"envase/componente: {tipo_producto}. Destinatario final: {destinatario or 'sin especificar'}. "
+        f"Material principal: {material or 'sin especificar'}.\n\n"
+        "Dime qué artículos del reglamento aplican a este caso y cuáles no, señala si hay alguna "
+        "exención conocida que pueda encajar (con el artículo exacto), y qué documentación "
+        "debería empezar a pedir al proveedor si procede.")
+    claves = elegir_fuentes(pregunta)
+    ctx = montar_contexto(claves)
+    resp = llamar(REGLAS, f"{ctx}\n\n<pregunta>\n{pregunta}\n</pregunta>")
+    guardar("triaje", {"pregunta": pregunta, "titulo": tipo_producto,
+                       "fuentes": claves, "respuesta": resp})
+    return render_template_string(PAGINA, vista="triaje", activa="consulta",
+                                  res={"titulo": f"Triaje — {tipo_producto}", "cuerpo": resp,
+                                       "fuentes": claves},
+                                  estado=estado_reglamento(), actualizado=fecha_actualizacion(),
+                                  historial=historial())
+
+
 @app.route("/analizar", methods=["POST"])
 def analizar():
-    fs = request.files.get("documento")
     nota = request.form.get("nota", "").strip()
     rol = request.form.get("rol", "sin especificar")
-    texto = leer_subida(fs) if fs and fs.filename else ""
-    if not texto and not nota:
+    documentos = extraer_documentos(request.files.getlist("documentos"))
+    if not documentos and not nota:
         return redirect(url_for("home"))
-    texto = texto[:60000]
 
-    claves = elegir_fuentes(texto[:8000], nota)
+    muestra = " ".join(d["texto"] for d in documentos)[:8000]
+    claves = elegir_fuentes(muestra, nota)
     ctx = montar_contexto(claves)
-    prompt = prompt_analizar(ctx, "", texto, fs.filename if fs else "nota", rol, nota)
+    prompt = prompt_analizar(ctx, "", documentos, rol, nota)
     resp = llamar(REGLAS, prompt, max_tokens=4000)
-    guardar("analisis", {"documento": fs.filename if fs else "nota", "rol": rol,
+    nombres = [d["nombre"] for d in documentos]
+    guardar("analisis", {"documentos": nombres, "rol": rol,
                          "nota": nota, "fuentes": claves, "respuesta": resp})
     return render_template_string(PAGINA, vista="analisis", activa="consulta",
-                                  res={"titulo": fs.filename if fs else "Nota suelta",
+                                  res={"titulo": ", ".join(nombres) or "Nota suelta",
                                        "cuerpo": resp, "fuentes": claves},
                                   estado=estado_reglamento(), actualizado=fecha_actualizacion(),
                                   historial=historial())
@@ -444,17 +562,21 @@ def normativa_articulo(clave):
 
 @app.route("/carpetas", methods=["GET"])
 def carpetas():
+    q = request.args.get("q", "").strip()
+    filtro_estado = request.args.get("estado", "").strip()
     return render_template_string(PAGINA_CARPETAS, activa="carpetas",
                                   estado=estado_reglamento(), actualizado=fecha_actualizacion(),
-                                  carpetas=listar_carpetas())
+                                  carpetas=listar_carpetas(q, filtro_estado),
+                                  q=q, filtro_estado=filtro_estado, estados=ESTADOS)
 
 
 @app.route("/carpetas/nueva", methods=["POST"])
 def carpeta_nueva():
     nombre = request.form.get("nombre", "").strip()
+    proveedor = request.form.get("proveedor", "").strip()
     if not nombre:
         return redirect(url_for("carpetas"))
-    slug = crear_carpeta(nombre)
+    slug = crear_carpeta(nombre, proveedor)
     return redirect(url_for("carpeta_ver", slug=slug))
 
 
@@ -463,10 +585,26 @@ def carpeta_ver(slug):
     d = carpeta_dir(slug)
     if not d:
         return redirect(url_for("carpetas"))
-    meta = json.loads((d / "_carpeta.json").read_text(encoding="utf-8"))
+    meta = leer_meta(d)
     return render_template_string(PAGINA_CARPETA, activa="carpetas",
                                   estado=estado_reglamento(), actualizado=fecha_actualizacion(),
-                                  carpeta={"slug": slug, **meta}, turnos=historial_carpeta(d))
+                                  carpeta={"slug": slug, **meta}, turnos=historial_carpeta(d),
+                                  estados=ESTADOS)
+
+
+@app.route("/carpetas/<slug>/estado", methods=["POST"])
+def carpeta_estado(slug):
+    d = carpeta_dir(slug)
+    if not d:
+        return redirect(url_for("carpetas"))
+    campos = {}
+    if request.form.get("estado") in ESTADOS:
+        campos["estado"] = request.form["estado"]
+    if "proveedor" in request.form:
+        campos["proveedor"] = request.form["proveedor"].strip()
+    if campos:
+        actualizar_meta(d, **campos)
+    return redirect(url_for("carpeta_ver", slug=slug))
 
 
 @app.route("/carpetas/<slug>/preguntar", methods=["POST"])
@@ -490,27 +628,19 @@ def carpeta_analizar(slug):
     d = carpeta_dir(slug)
     if not d:
         return redirect(url_for("carpetas"))
-    fs = request.files.get("documento")
     nota = request.form.get("nota", "").strip()
     rol = request.form.get("rol", "sin especificar")
-    datos = fs.read() if fs and fs.filename else b""
-    texto = leer_subida_bytes(datos, fs.filename) if datos else ""
-    if not texto and not nota:
+    documentos = extraer_documentos(request.files.getlist("documentos"), guardar_en=d)
+    if not documentos and not nota:
         return redirect(url_for("carpeta_ver", slug=slug))
-    texto = texto[:60000]
-
-    nombre_doc = None
-    if datos:
-        ts_fichero = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        nombre_doc = f"{ts_fichero}-{fs.filename}"
-        (d / nombre_doc).write_bytes(datos)
 
     hilo = contexto_previo(historial_carpeta(d))
-    claves = elegir_fuentes(texto[:8000], nota)
+    muestra = " ".join(dd["texto"] for dd in documentos)[:8000]
+    claves = elegir_fuentes(muestra, nota)
     ctx = montar_contexto(claves)
-    prompt = prompt_analizar(ctx, hilo, texto, fs.filename if fs else "nota", rol, nota)
+    prompt = prompt_analizar(ctx, hilo, documentos, rol, nota)
     resp = llamar(REGLAS, prompt, max_tokens=4000)
-    guardar_turno(d, "analisis", {"documento": fs.filename if fs else "nota", "fichero": nombre_doc,
+    guardar_turno(d, "analisis", {"documentos": [dd["nombre"] for dd in documentos],
                                   "rol": rol, "nota": nota, "fuentes": claves, "respuesta": resp})
     return redirect(url_for("carpeta_ver", slug=slug))
 
@@ -531,9 +661,15 @@ def historial():
             d = json.loads(f.read_text(encoding="utf-8"))
         except Exception:
             continue
-        out.append({"fecha": f.stem[:15].replace("-", " "),
-                    "tipo": "análisis" if "analisis" in f.stem else "consulta",
-                    "que": d.get("pregunta") or d.get("documento", "")})
+        if "analisis" in f.stem:
+            tipo = "análisis"
+        elif "triaje" in f.stem:
+            tipo = "triaje"
+        else:
+            tipo = "consulta"
+        out.append({"fecha": f.stem[:15].replace("-", " "), "tipo": tipo,
+                    "que": d.get("titulo") or d.get("pregunta")
+                          or ", ".join(d.get("documentos", [])) or d.get("documento", "")})
     return out
 
 
@@ -573,6 +709,11 @@ BASE_HEAD = """<!doctype html><html lang="es"><meta charset="utf-8">
  .lista{display:flex;flex-direction:column;gap:2px}
  .itm{color:#16181a;text-decoration:none;font-size:13.5px;padding:5px 6px;border-radius:3px}
  .itm:hover{background:#eceff1}
+ .estado-abierta{background:#e4ecf7;color:#1c4a8c}
+ .estado-cerrada{background:#e3f3e6;color:#256b34}
+ .aviso-inline{background:#fff0d6;color:#8a5a00}
+ .copiar{margin-top:8px;background:#eceff1;color:#16181a;font-size:12.5px;padding:6px 12px}
+ .copiar:hover{background:#dde1e4}
  .md{background:#fbfbfc;border:1px solid #e3e6e8;border-radius:3px;padding:6px 18px;overflow-x:auto}
  .md h1{font-size:18px;margin:16px 0 8px} .md h2{font-size:15px;margin:16px 0 6px}
  .md h3{font-size:13.5px;margin:14px 0 6px}
@@ -594,6 +735,17 @@ BASE_HEAD = """<!doctype html><html lang="es"><meta charset="utf-8">
   </div>
   <span>{{ estado }}{% if actualizado %} · actualizado {{ actualizado }}{% endif %}</span>
 </header>
+<script>
+function copiarBloque(id, btn) {
+  var el = document.getElementById(id);
+  if (!el || !navigator.clipboard) return;
+  navigator.clipboard.writeText(el.innerText).then(function () {
+    var original = btn.textContent;
+    btn.textContent = "Copiado";
+    setTimeout(function () { btn.textContent = original; }, 1500);
+  });
+}
+</script>
 """
 
 PAGINA = BASE_HEAD + """
@@ -608,9 +760,34 @@ PAGINA = BASE_HEAD + """
   <h2>{{ res.titulo }}</h2>
   <p class="ayuda">Fuentes usadas:
     {% for f in res.fuentes %}<span class="ref">{{ f }}</span>{% endfor %}</p>
-  <div class="res">{{ res.cuerpo }}</div>
+  <div class="res" id="resultado">{{ res.cuerpo }}</div>
+  <button type="button" class="copiar" onclick="copiarBloque('resultado', this)">Copiar respuesta</button>
 </div>
 {% endif %}
+
+<div class="caja">
+  <h2>Triaje rápido</h2>
+  <p class="ayuda">Antes de pedir nada a un proveedor: ¿esto me aplica? Sin subir ningún documento,
+    una primera pasada sobre un producto o componente.</p>
+  <form method="post" action="/triaje">
+    <input type="text" name="tipo_producto" placeholder="Estuche de cartón para gafas graduadas" required>
+    <div class="fila">
+      <div>
+        <label>Destinatario final</label>
+        <select name="destinatario">
+          <option>Consumidor final</option>
+          <option>Usuario final profesional (producto sanitario / IVD)</option>
+          <option>Sin especificar</option>
+        </select>
+      </div>
+      <div>
+        <label>Material principal</label>
+        <input type="text" name="material" placeholder="Cartón, PVC, blíster...">
+      </div>
+    </div>
+    <button>Triaje</button>
+  </form>
+</div>
 
 <div class="caja">
   <h2>Preguntar al reglamento</h2>
@@ -623,9 +800,10 @@ PAGINA = BASE_HEAD + """
 
 <div class="caja">
   <h2>Revisar un documento</h2>
-  <p class="ayuda">Informe de proveedor, correo, declaración, ficha técnica. PDF, DOCX o texto.</p>
+  <p class="ayuda">Informe de proveedor, correo (con adjuntos), declaración, ficha técnica.
+    PDF, DOCX, EML o texto. Puedes seleccionar varios a la vez si pertenecen al mismo caso.</p>
   <form method="post" action="/analizar" enctype="multipart/form-data">
-    <input type="file" name="documento" accept=".pdf,.docx,.txt,.md,.eml">
+    <input type="file" name="documentos" accept=".pdf,.docx,.txt,.md,.eml" multiple>
     <div class="fila">
       <div>
         <label>Rol legal en esta referencia</label>
@@ -711,23 +889,46 @@ PAGINA_CARPETAS = BASE_HEAD + """
   <p class="ayuda">Un caso, una duda, un proveedor concreto. Todo lo que preguntes o subas
     dentro se recuerda entre turnos, como una conversación.</p>
   <form method="post" action="{{ url_for('carpeta_nueva') }}">
-    <input type="text" name="nombre" placeholder="Proveedor X — blíster PVC" required>
+    <div class="fila">
+      <input type="text" name="nombre" placeholder="Proveedor X — blíster PVC" required>
+      <input type="text" name="proveedor" placeholder="Proveedor (opcional, para filtrar luego)">
+    </div>
     <button>Crear carpeta</button>
   </form>
 </div>
 
 <div class="caja">
-  <h2>Carpetas abiertas</h2>
+  <h2>Casos</h2>
+  <form method="get" action="{{ url_for('carpetas') }}">
+    <div class="fila">
+      <input type="text" name="q" value="{{ q }}" placeholder="Buscar por nombre o proveedor">
+      <select name="estado">
+        <option value="">Todos los estados</option>
+        {% for e in estados %}
+        <option value="{{ e }}" {{ 'selected' if e == filtro_estado else '' }}>{{ e }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit">Filtrar</button>
+    </div>
+  </form>
+</div>
+
+<div class="caja">
   {% if carpetas %}
   <div class="lista">
     {% for c in carpetas %}
     <a class="itm" href="{{ url_for('carpeta_ver', slug=c.slug) }}">{{ c.nombre }}
+      {% if c.proveedor %}<span class="ref">{{ c.proveedor }}</span>{% endif %}
+      <span class="ref estado-{{ 'cerrada' if c.cerrada else 'abierta' }}">{{ c.estado }}</span>
       <span class="ref">{{ c.turnos }} turno{{ 's' if c.turnos != 1 else '' }}</span>
+      {% if c.dias is not none and not c.cerrada and c.dias >= 3 %}
+      <span class="ref aviso-inline">{{ c.dias }} días sin actividad</span>
+      {% endif %}
       <span class="ref">{{ c.ultima }}</span></a>
     {% endfor %}
   </div>
   {% else %}
-  <p class="ayuda">Ninguna todavía.</p>
+  <p class="ayuda">Ninguna carpeta coincide con el filtro.</p>
   {% endif %}
 </div>
 
@@ -740,17 +941,35 @@ PAGINA_CARPETA = BASE_HEAD + """
   <p class="ayuda"><a href="{{ url_for('carpetas') }}">&larr; Carpetas</a></p>
   <h2>{{ carpeta.nombre }}</h2>
   <p class="ayuda">Creada {{ carpeta.creada[:16].replace('T', ' ') }}</p>
+  <form method="post" action="{{ url_for('carpeta_estado', slug=carpeta.slug) }}">
+    <div class="fila">
+      <div>
+        <label>Estado</label>
+        <select name="estado">
+          {% for e in estados %}
+          <option value="{{ e }}" {{ 'selected' if e == carpeta.estado else '' }}>{{ e }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Proveedor</label>
+        <input type="text" name="proveedor" value="{{ carpeta.proveedor }}">
+      </div>
+    </div>
+    <button>Guardar</button>
+  </form>
 </div>
 
 {% for t in turnos %}
 <div class="caja">
-  <h2>{{ t.pregunta if t.tipo == 'pregunta' else (t.documento or 'Nota suelta') }}</h2>
+  <h2>{{ t.pregunta if t.tipo == 'pregunta' else (t.documentos|join(', ') if t.documentos else (t.documento or 'Nota suelta')) }}</h2>
   {% if t.tipo == 'analisis' %}
   <p class="ayuda">Rol: {{ t.rol }}{% if t.nota %} · {{ t.nota }}{% endif %}</p>
   {% endif %}
   <p class="ayuda">Fuentes:
     {% for f in t.fuentes %}<span class="ref">{{ f }}</span>{% endfor %}</p>
-  <div class="res">{{ t.respuesta }}</div>
+  <div class="res" id="turno-{{ loop.index }}">{{ t.respuesta }}</div>
+  <button type="button" class="copiar" onclick="copiarBloque('turno-{{ loop.index }}', this)">Copiar respuesta</button>
   <p class="ayuda" style="margin-top:8px">{{ t.fecha[:16].replace('T', ' ') }}</p>
 </div>
 {% endfor %}
@@ -766,9 +985,10 @@ PAGINA_CARPETA = BASE_HEAD + """
 
 <div class="caja">
   <h2>Subir documento a esta carpeta</h2>
-  <p class="ayuda">El documento original se guarda dentro de la carpeta, junto con el análisis.</p>
+  <p class="ayuda">El documento original se guarda dentro de la carpeta, junto con el análisis.
+    Correo (.eml) con adjuntos, o varios ficheros del mismo intercambio a la vez.</p>
   <form method="post" action="{{ url_for('carpeta_analizar', slug=carpeta.slug) }}" enctype="multipart/form-data">
-    <input type="file" name="documento" accept=".pdf,.docx,.txt,.md,.eml">
+    <input type="file" name="documentos" accept=".pdf,.docx,.txt,.md,.eml" multiple>
     <div class="fila">
       <div>
         <label>Rol legal en esta referencia</label>
