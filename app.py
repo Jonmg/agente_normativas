@@ -15,10 +15,12 @@ las consultas y los análisis se guardan como ficheros en ./salidas/.
 import os
 import re
 import json
+import html
 import datetime
 from pathlib import Path
 
 from flask import Flask, request, render_template_string, redirect, url_for
+from markupsafe import Markup
 import anthropic
 
 RAIZ = Path(__file__).parent
@@ -73,6 +75,62 @@ def fecha_actualizacion() -> str:
     if not f.exists():
         return ""
     return datetime.datetime.fromtimestamp(f.stat().st_mtime).strftime("%d/%m/%Y")
+
+
+# --------------------------------------------------------------------------
+# Visualizador de markdown — solo el subconjunto que generamos nosotros
+# mismos en preparar_reglamento.py (cabeceras, negrita, cursiva, código en
+# línea, citas, listas). No es CommonMark completo: no hace falta, y así no
+# se añade una dependencia nueva para renderizar contenido que ya controlamos.
+# --------------------------------------------------------------------------
+def _md_en_linea(texto: str) -> str:
+    t = html.escape(texto)
+    t = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", t)
+    t = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<em>\1</em>", t)
+    t = re.sub(r"`(.+?)`", r"<code>\1</code>", t)
+    return t
+
+
+def markdown_a_html(md: str) -> Markup:
+    """Recorre línea a línea (no por bloques) para que una cabecera o cita
+    seguida de una lista sin línea en blanco de por medio, como en
+    00-INDICE.md, no se trague todo como un párrafo."""
+    salida, parrafo, lista = [], [], []
+
+    def cerrar_parrafo():
+        if parrafo:
+            salida.append(f"<p>{'<br>'.join(_md_en_linea(l) for l in parrafo)}</p>")
+            parrafo.clear()
+
+    def cerrar_lista():
+        if lista:
+            salida.append("<ul>" + "".join(f"<li>{_md_en_linea(l)}</li>" for l in lista) + "</ul>")
+            lista.clear()
+
+    for linea in md.strip().split("\n"):
+        l = linea.strip()
+        if not l:
+            cerrar_parrafo(); cerrar_lista()
+            continue
+        m = re.match(r"^(#{1,3})\s+(.*)$", l)
+        if m:
+            cerrar_parrafo(); cerrar_lista()
+            nivel = len(m.group(1))
+            salida.append(f"<h{nivel}>{_md_en_linea(m.group(2))}</h{nivel}>")
+            continue
+        if l.startswith("> "):
+            cerrar_parrafo(); cerrar_lista()
+            salida.append(f"<blockquote>{_md_en_linea(l[2:].strip())}</blockquote>")
+            continue
+        if l.startswith("- "):
+            cerrar_parrafo()
+            lista.append(l[2:].strip())
+            continue
+        cerrar_lista()
+        parrafo.append(l)
+
+    cerrar_parrafo(); cerrar_lista()
+    return Markup("\n".join(salida))
 
 
 def elegir_fuentes(texto: str, extra_terminos: str = "") -> list:
@@ -277,7 +335,7 @@ def normativa_articulo(clave):
     titulo = contenido.split("\n", 1)[0].lstrip("# ").strip()
     return render_template_string(PAGINA_ARTICULO, activa="normativa",
                                   estado=estado_reglamento(), actualizado=fecha_actualizacion(),
-                                  clave=clave, titulo=titulo, contenido=contenido)
+                                  clave=clave, titulo=titulo, contenido_html=markdown_a_html(contenido))
 
 
 def estado_reglamento():
@@ -338,6 +396,15 @@ BASE_HEAD = """<!doctype html><html lang="es"><meta charset="utf-8">
  .lista{display:flex;flex-direction:column;gap:2px}
  .itm{color:#16181a;text-decoration:none;font-size:13.5px;padding:5px 6px;border-radius:3px}
  .itm:hover{background:#eceff1}
+ .md{background:#fbfbfc;border:1px solid #e3e6e8;border-radius:3px;padding:6px 18px;overflow-x:auto}
+ .md h1{font-size:18px;margin:16px 0 8px} .md h2{font-size:15px;margin:16px 0 6px}
+ .md h3{font-size:13.5px;margin:14px 0 6px}
+ .md p{margin:0 0 12px;font-size:14px;line-height:1.6}
+ .md strong{font-weight:700} .md em{font-style:italic}
+ .md code{font:12.5px ui-monospace,monospace;background:#eceff1;padding:1px 5px;border-radius:2px}
+ .md blockquote{margin:0 0 12px;padding:4px 12px;border-left:3px solid #c8cfd4;
+   color:#5a646c;font-size:13.5px}
+ .md ul{margin:0 0 12px;padding-left:20px} .md li{font-size:14px;margin:2px 0}
 </style>
 <header>
   <div class="cab">
@@ -453,7 +520,7 @@ PAGINA_ARTICULO = BASE_HEAD + """
 
 <div class="caja">
   <p class="ayuda"><a href="{{ url_for('normativa') }}">&larr; Normativa</a></p>
-  <div class="res">{{ contenido }}</div>
+  <div class="md">{{ contenido_html }}</div>
 </div>
 
 </main></html>"""

@@ -81,6 +81,23 @@ Por eso se pide en cada revisión en lugar de fijarlo una vez.
 
 Todo queda en `salidas/` como JSON con fecha, fuentes usadas y respuesta.
 
+## Pruebas
+
+Batería offline (`unittest`, sin dependencias nuevas). No llama a la API de
+Anthropic ni a EUR-Lex; corre contra el reglamento real ya cargado en
+`./reglamento/`:
+
+```bash
+python -m unittest pruebas -v
+```
+
+Cubre: selección de fuentes (`elegir_fuentes`), orden y recuento de
+artículos/anexos, el renderizador de markdown (incluida una prueba de que
+escapa HTML para evitar XSS), las rutas de la web, y el troceado por
+artículo de `preparar_reglamento.py` (el regex que separa "Artículo 12"
+como cabecera de una simple mención a "el artículo 12" dentro de un
+párrafo).
+
 ## Límites conocidos
 
 - El parser depende del HTML de EUR-Lex. Si cambian el formato, `preparar_reglamento.py`
