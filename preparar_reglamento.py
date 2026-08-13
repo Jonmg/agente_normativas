@@ -31,12 +31,23 @@ ROMANOS = "I II III IV V VI VII VIII IX X XI XII XIII XIV XV XVI".split()
 # --------------------------------------------------------------------------
 # 1. Descarga
 # --------------------------------------------------------------------------
-def descargar() -> str:
-    print("Descargando de EUR-Lex...", flush=True)
-    req = Request(URL, headers={"User-Agent": "Mozilla/5.0 (compatible; ppwr-local)"})
-    with urlopen(req, timeout=180) as r:
-        crudo = r.read()
+def descargar(archivo_local: str = None) -> str:
+    if archivo_local:
+        print(f"Leyendo {archivo_local}...", flush=True)
+        crudo = Path(archivo_local).read_bytes()
+    else:
+        print("Descargando de EUR-Lex...", flush=True)
+        req = Request(URL, headers={"User-Agent": "Mozilla/5.0 (compatible; ppwr-local)"})
+        with urlopen(req, timeout=180) as r:
+            crudo = r.read()
     print(f"  {len(crudo)/1024:.0f} KB recibidos")
+    if not crudo:
+        raise SystemExit(
+            "0 bytes recibidos. EUR-Lex está devolviendo un reto anti-bot (WAF) a\n"
+            "peticiones automáticas. Solución: abre esta URL en un navegador normal,\n"
+            "guarda la página como HTML, y ejecuta:\n"
+            f"    python preparar_reglamento.py ruta/al/archivo.html\n\n{URL}"
+        )
     for enc in ("utf-8", "iso-8859-1", "cp1252"):
         try:
             return crudo.decode(enc)
@@ -114,7 +125,7 @@ def main():
     (BASE / "articulos").mkdir(exist_ok=True)
     (BASE / "anexos").mkdir(exist_ok=True)
 
-    crudo = descargar()
+    crudo = descargar(sys.argv[1] if len(sys.argv) > 1 else None)
     texto = html_a_texto(crudo)
     (BASE / "_texto-plano.txt").write_text(texto, encoding="utf-8")
     print(f"Texto plano: {len(texto):,} caracteres (~{len(texto)//6:,} palabras)")

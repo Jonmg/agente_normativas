@@ -51,6 +51,30 @@ def catalogo() -> dict:
     return c
 
 
+ROMANOS = "I II III IV V VI VII VIII IX X XI XII XIII XIV XV XVI".split()
+
+
+def normativa_lista() -> tuple:
+    """Artículos y anexos con su título, ordenados, para la pestaña Normativa."""
+    cat = catalogo()
+    arts, anexos = [], []
+    for k, f in cat.items():
+        titulo = f.read_text(encoding="utf-8").split("\n", 1)[0].lstrip("# ").strip()
+        item = {"clave": k, "titulo": titulo}
+        (arts if k.startswith("art-") else anexos).append(item)
+    arts.sort(key=lambda x: int(x["clave"].split("-")[1]))
+    anexos.sort(key=lambda x: ROMANOS.index(x["clave"].split("-", 1)[1])
+                if x["clave"].split("-", 1)[1] in ROMANOS else 999)
+    return arts, anexos
+
+
+def fecha_actualizacion() -> str:
+    f = REG / "00-INDICE.md"
+    if not f.exists():
+        return ""
+    return datetime.datetime.fromtimestamp(f.stat().st_mtime).strftime("%d/%m/%Y")
+
+
 def elegir_fuentes(texto: str, extra_terminos: str = "") -> list:
     """
     Selecciona qué ficheros cargar. Dos vías, sin vectores:
@@ -167,8 +191,9 @@ def guardar(tipo: str, payload: dict) -> str:
 # --------------------------------------------------------------------------
 @app.route("/", methods=["GET"])
 def home():
-    return render_template_string(PAGINA, vista="consulta", res=None,
-                                  estado=estado_reglamento(), historial=historial())
+    return render_template_string(PAGINA, vista="consulta", res=None, activa="consulta",
+                                  estado=estado_reglamento(), actualizado=fecha_actualizacion(),
+                                  historial=historial())
 
 
 @app.route("/preguntar", methods=["POST"])
@@ -180,9 +205,10 @@ def preguntar():
     ctx = montar_contexto(claves)
     resp = llamar(REGLAS, f"{ctx}\n\n<pregunta>\n{pregunta}\n</pregunta>")
     guardar("consulta", {"pregunta": pregunta, "fuentes": claves, "respuesta": resp})
-    return render_template_string(PAGINA, vista="consulta",
+    return render_template_string(PAGINA, vista="consulta", activa="consulta",
                                   res={"titulo": pregunta, "cuerpo": resp, "fuentes": claves},
-                                  estado=estado_reglamento(), historial=historial())
+                                  estado=estado_reglamento(), actualizado=fecha_actualizacion(),
+                                  historial=historial())
 
 
 @app.route("/analizar", methods=["POST"])
@@ -221,10 +247,37 @@ Analiza el documento contra el reglamento y devuelve, en este orden:
     resp = llamar(REGLAS, prompt, max_tokens=4000)
     guardar("analisis", {"documento": fs.filename if fs else "nota", "rol": rol,
                          "nota": nota, "fuentes": claves, "respuesta": resp})
-    return render_template_string(PAGINA, vista="analisis",
+    return render_template_string(PAGINA, vista="analisis", activa="consulta",
                                   res={"titulo": fs.filename if fs else "Nota suelta",
                                        "cuerpo": resp, "fuentes": claves},
-                                  estado=estado_reglamento(), historial=historial())
+                                  estado=estado_reglamento(), actualizado=fecha_actualizacion(),
+                                  historial=historial())
+
+
+@app.route("/normativa", methods=["GET"])
+def normativa():
+    arts, anexos = normativa_lista()
+    return render_template_string(PAGINA_NORMATIVA, activa="normativa",
+                                  estado=estado_reglamento(), actualizado=fecha_actualizacion(),
+                                  arts=arts, anexos=anexos)
+
+
+@app.route("/normativa/<clave>", methods=["GET"])
+def normativa_articulo(clave):
+    if clave == "considerandos":
+        f = REG / "considerandos.md"
+        if not f.exists():
+            return redirect(url_for("normativa"))
+        contenido = f.read_text(encoding="utf-8")
+    else:
+        cat = catalogo()
+        if clave not in cat:
+            return redirect(url_for("normativa"))
+        contenido = cat[clave].read_text(encoding="utf-8")
+    titulo = contenido.split("\n", 1)[0].lstrip("# ").strip()
+    return render_template_string(PAGINA_ARTICULO, activa="normativa",
+                                  estado=estado_reglamento(), actualizado=fecha_actualizacion(),
+                                  clave=clave, titulo=titulo, contenido=contenido)
 
 
 def estado_reglamento():
@@ -250,7 +303,7 @@ def historial():
 
 
 # --------------------------------------------------------------------------
-PAGINA = """<!doctype html><html lang="es"><meta charset="utf-8">
+BASE_HEAD = """<!doctype html><html lang="es"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Conformidad de envases · 2025/40</title>
 <style>
@@ -258,7 +311,12 @@ PAGINA = """<!doctype html><html lang="es"><meta charset="utf-8">
  body{font:15px/1.55 system-ui,sans-serif;margin:0;background:#f4f5f6;color:#16181a}
  header{background:#16181a;color:#fff;padding:14px 20px;display:flex;
    justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+ header .cab{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
  header b{font-size:16px} header span{font-size:12px;color:#9aa4ad;font-family:ui-monospace,monospace}
+ nav.nav{display:flex;gap:4px}
+ nav.nav a{color:#c7ccd1;text-decoration:none;font-size:13px;padding:5px 10px;border-radius:3px}
+ nav.nav a:hover{background:#2c3238;color:#fff}
+ nav.nav a.act{background:#fff;color:#16181a;font-weight:600}
  main{max-width:900px;margin:0 auto;padding:20px 16px 60px;display:flex;flex-direction:column;gap:16px}
  .caja{background:#fff;border:1px solid #d8dcdf;border-radius:4px;padding:18px}
  h2{margin:0 0 4px;font-size:15px}
@@ -277,11 +335,23 @@ PAGINA = """<!doctype html><html lang="es"><meta charset="utf-8">
    color:#39434b;padding:2px 7px;border-radius:2px;margin:2px 3px 0 0}
  .hist{font-size:12.5px;color:#5a646c;border-top:1px solid #e3e6e8;padding:6px 0}
  .aviso{background:#fff6e5;border-left:3px solid #c98a12;padding:10px 12px;font-size:13px}
+ .lista{display:flex;flex-direction:column;gap:2px}
+ .itm{color:#16181a;text-decoration:none;font-size:13.5px;padding:5px 6px;border-radius:3px}
+ .itm:hover{background:#eceff1}
 </style>
 <header>
-  <b>Conformidad de envases · Reglamento (UE) 2025/40</b>
-  <span>{{ estado }}</span>
+  <div class="cab">
+    <b>Conformidad de envases · Reglamento (UE) 2025/40</b>
+    <nav class="nav">
+      <a href="{{ url_for('home') }}" class="{{ 'act' if activa=='consulta' else '' }}">Consultar</a>
+      <a href="{{ url_for('normativa') }}" class="{{ 'act' if activa=='normativa' else '' }}">Normativa</a>
+    </nav>
+  </div>
+  <span>{{ estado }}{% if actualizado %} · actualizado {{ actualizado }}{% endif %}</span>
 </header>
+"""
+
+PAGINA = BASE_HEAD + """
 <main>
 
 {% if 'SIN CARGAR' in estado %}
@@ -340,6 +410,51 @@ PAGINA = """<!doctype html><html lang="es"><meta charset="utf-8">
   <p class="ayuda" style="margin-top:10px">Guardados en <code>salidas/</code> como JSON.</p>
 </div>
 {% endif %}
+
+</main></html>"""
+
+PAGINA_NORMATIVA = BASE_HEAD + """
+<main>
+
+{% if 'SIN CARGAR' in estado %}
+<div class="caja aviso">El reglamento no está cargado. En la Pi: <code>python preparar_reglamento.py</code></div>
+{% endif %}
+
+<div class="caja">
+  <h2>Normativa cargada</h2>
+  <p class="ayuda">Reglamento (UE) 2025/40 (PPWR), envases y residuos de envases.
+    Aplicable desde el 12/08/2026.</p>
+  <p class="ayuda"><a href="{{ url_for('normativa_articulo', clave='considerandos') }}">Ver considerandos</a>
+    (interpretativos, no vinculantes)</p>
+</div>
+
+<div class="caja">
+  <h2>Artículos</h2>
+  <div class="lista">
+    {% for a in arts %}
+    <a class="itm" href="{{ url_for('normativa_articulo', clave=a.clave) }}">Art. {{ a.clave.split('-')[1]|int }} — {{ a.titulo }}</a>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="caja">
+  <h2>Anexos</h2>
+  <div class="lista">
+    {% for a in anexos %}
+    <a class="itm" href="{{ url_for('normativa_articulo', clave=a.clave) }}">Anexo {{ a.clave.split('-')[1] }} — {{ a.titulo }}</a>
+    {% endfor %}
+  </div>
+</div>
+
+</main></html>"""
+
+PAGINA_ARTICULO = BASE_HEAD + """
+<main>
+
+<div class="caja">
+  <p class="ayuda"><a href="{{ url_for('normativa') }}">&larr; Normativa</a></p>
+  <div class="res">{{ contenido }}</div>
+</div>
 
 </main></html>"""
 
