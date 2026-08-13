@@ -102,8 +102,14 @@ texto o por estado, las carpetas abiertas van primero, ordenadas por antigüedad
 la última actividad (con aviso a partir de 3 días sin movimiento), y las cerradas
 (Conforme / No aplica) quedan al final.
 
-Cada respuesta lleva un botón "Copiar respuesta" para pegarla directamente en un
-correo al proveedor.
+Cada respuesta se ve renderizada como markdown (cabeceras, negrita, tablas, listas —
+lo que de verdad usa la IA en sus respuestas), con un botón "Copiar markdown" que
+copia el texto crudo (no el HTML renderizado, para poder pegarlo tal cual en otro
+sitio) y un enlace "Descargar .md".
+
+El listado de "Últimos trabajos" (en Consultar) y cada turno de una carpeta enlazan
+a la respuesta completa — antes solo se veía la pregunta, y la respuesta se perdía
+en cuanto se salía de la página del resultado.
 
 Todo queda en `salidas/` como JSON con fecha, fuentes usadas y respuesta.
 Ninguna carpeta ni salida se versiona (`salidas/` está en `.gitignore`).
@@ -119,13 +125,13 @@ python -m unittest pruebas -v
 ```
 
 Cubre: selección de fuentes (`elegir_fuentes`), orden y recuento de
-artículos/anexos, el renderizador de markdown (incluida una prueba de que
-escapa HTML para evitar XSS), las rutas de la web, estado/proveedor y filtrado
-del panel de seguimiento de carpetas, el parseo de `.eml` con adjuntos, la
-subida de varios documentos en una misma revisión, el triaje rápido, y el
-troceado por artículo de `preparar_reglamento.py` (el regex que separa
-"Artículo 12" como cabecera de una simple mención a "el artículo 12" dentro
-de un párrafo).
+artículos/anexos, el renderizador de markdown (tablas, líneas horizontales, y
+una prueba de que escapa HTML para evitar XSS), las rutas de la web, el
+historial navegable y descargable, estado/proveedor y filtrado del panel de
+seguimiento de carpetas, el parseo de `.eml` con adjuntos, la subida de varios
+documentos en una misma revisión, el triaje rápido, y el troceado por artículo
+de `preparar_reglamento.py` (el regex que separa "Artículo 12" como cabecera
+de una simple mención a "el artículo 12" dentro de un párrafo).
 
 ## Límites conocidos
 

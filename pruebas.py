@@ -101,6 +101,21 @@ class TestMarkdown(unittest.TestCase):
         out = app.markdown_a_html("Primero.\n\nSegundo.")
         self.assertEqual(out.count("<p>"), 2)
 
+    def test_linea_horizontal(self):
+        self.assertIn("<hr>", app.markdown_a_html("Antes\n\n---\n\nDespués"))
+
+    def test_tabla_gfm(self):
+        out = app.markdown_a_html("| Artículo | Materia |\n|---|---|\n| Art. 5 | Sustancias |")
+        self.assertIn("<table>", out)
+        self.assertIn("<th>Artículo</th>", out)
+        self.assertIn("<td>Art. 5</td>", out)
+        self.assertIn("<td>Sustancias</td>", out)
+
+    def test_tabla_no_confunde_una_linea_suelta_con_pipe(self):
+        # una sola línea con "|" que no va seguida de fila separadora no es tabla
+        out = app.markdown_a_html("Coste | beneficio, sin más contexto.")
+        self.assertNotIn("<table>", out)
+
     def test_escapa_html_para_evitar_xss(self):
         out = app.markdown_a_html("<script>alert(1)</script>")
         self.assertNotIn("<script>", out)
@@ -150,6 +165,55 @@ class TestRutasWeb(unittest.TestCase):
     def test_analizar_vacio_redirige_sin_llamar_api(self):
         r = self.c.post("/analizar", data={})
         self.assertEqual(r.status_code, 302)
+
+
+class TestHistorial(unittest.TestCase):
+    """El historial de 'Últimos trabajos' debe poder reabrirse (no solo verse
+    la pregunta) y descargarse como .md — antes se perdía la respuesta en
+    cuanto se salía de la página de resultado."""
+
+    def setUp(self):
+        import tempfile
+        app.app.testing = True
+        self.c = app.app.test_client()
+        self._llamar_original = app.llamar
+        app.llamar = lambda system, prompt, max_tokens=3000: "## Título\n\nRespuesta con formato."
+        self._salidas_original = app.SALIDAS
+        self._tmp = tempfile.mkdtemp()
+        app.SALIDAS = Path(self._tmp)
+
+    def tearDown(self):
+        import shutil
+        app.llamar = self._llamar_original
+        app.SALIDAS = self._salidas_original
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_respuesta_recien_generada_se_ve_como_markdown(self):
+        r = self.c.post("/preguntar", data={"pregunta": "¿Aplica a cartón?"})
+        self.assertIn(b"<h2>T\xc3\xadtulo</h2>", r.data)
+
+    def test_historial_enlaza_a_la_respuesta_completa(self):
+        self.c.post("/preguntar", data={"pregunta": "¿Aplica a cartón?"})
+        body = self.c.get("/").data.decode()
+        m = re.search(r'href="(/historial/[^"]+)"', body)
+        self.assertIsNotNone(m)
+        r = self.c.get(m.group(1))
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(b"Respuesta con formato.", r.data)
+
+    def test_descarga_devuelve_markdown_crudo_no_html(self):
+        self.c.post("/preguntar", data={"pregunta": "¿Aplica a cartón?"})
+        body = self.c.get("/").data.decode()
+        id_ = re.search(r'/historial/([\w-]+)"', body).group(1)
+        r = self.c.get(f"/historial/{id_}.md")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.mimetype, "text/markdown")
+        self.assertIn("## Título", r.data.decode())
+        self.assertNotIn("<h2>", r.data.decode())
+
+    def test_id_invalido_no_toca_el_filesystem_fuera_de_salidas(self):
+        self.assertIsNone(app._historial_ruta("../../etc/passwd"))
+        self.assertIsNone(app._historial_ruta("no-existe"))
 
 
 class TestCarpetas(unittest.TestCase):
@@ -213,6 +277,18 @@ class TestCarpetas(unittest.TestCase):
         guardados = list(app.carpeta_dir(slug).glob("*.txt"))
         self.assertEqual(len(guardados), 1)
         self.assertEqual(guardados[0].read_bytes(), b"contenido de prueba")
+
+    def test_turno_se_ve_como_markdown_y_se_puede_descargar(self):
+        slug = self._crear_carpeta()
+        self.c.post(f"/carpetas/{slug}/preguntar", data={"pregunta": "¿Aplica?"})
+        body = self.c.get(f"/carpetas/{slug}").data.decode()
+        self.assertIn('<div class="md">', body)
+        m = re.search(r'href="(/carpetas/[^"]+/turno/[^"]+\.md)"', body)
+        self.assertIsNotNone(m)
+        r = self.c.get(m.group(1))
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.mimetype, "text/markdown")
+        self.assertIn("respuesta simulada", r.data.decode())
 
     def test_varios_documentos_en_una_sola_revision_entran_en_el_prompt(self):
         import io
@@ -434,13 +510,21 @@ class TestMuestraParaElegirFuentes(unittest.TestCase):
 
 class TestTriaje(unittest.TestCase):
     def setUp(self):
+        import tempfile
         app.app.testing = True
         self.c = app.app.test_client()
         self._llamar_original = app.llamar
         app.llamar = lambda system, prompt, max_tokens=3000: "respuesta simulada de triaje"
+        # aislar de salidas/ real: guardar() escribe ahí en el flujo feliz
+        self._salidas_original = app.SALIDAS
+        self._tmp = tempfile.mkdtemp()
+        app.SALIDAS = Path(self._tmp)
 
     def tearDown(self):
+        import shutil
         app.llamar = self._llamar_original
+        app.SALIDAS = self._salidas_original
+        shutil.rmtree(self._tmp, ignore_errors=True)
 
     def test_triaje_sin_tipo_producto_redirige_sin_llamar_api(self):
         r = self.c.post("/triaje", data={"tipo_producto": ""})

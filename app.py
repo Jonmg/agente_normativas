@@ -85,11 +85,16 @@ def fecha_actualizacion() -> str:
 
 
 # --------------------------------------------------------------------------
-# Visualizador de markdown — solo el subconjunto que generamos nosotros
-# mismos en preparar_reglamento.py (cabeceras, negrita, cursiva, código en
-# línea, citas, listas). No es CommonMark completo: no hace falta, y así no
-# se añade una dependencia nueva para renderizar contenido que ya controlamos.
+# Visualizador de markdown — el subconjunto que generamos en
+# preparar_reglamento.py (cabeceras, negrita, cursiva, código en línea,
+# citas, listas) más lo que usan de verdad las respuestas de la IA (tablas
+# GFM, líneas horizontales). No es CommonMark completo: no hace falta, y así
+# no se añade una dependencia nueva para renderizar contenido que ya
+# controlamos o que sale de nuestro propio prompt.
 # --------------------------------------------------------------------------
+_SEPARADOR_TABLA = re.compile(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?$")
+
+
 def _md_en_linea(texto: str) -> str:
     t = html.escape(texto)
     t = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", t)
@@ -98,11 +103,25 @@ def _md_en_linea(texto: str) -> str:
     return t
 
 
+def _celdas_tabla(linea: str) -> list:
+    l = linea.strip()
+    if l.startswith("|"):
+        l = l[1:]
+    if l.endswith("|"):
+        l = l[:-1]
+    return [c.strip() for c in l.split("|")]
+
+
 def markdown_a_html(md: str) -> Markup:
     """Recorre línea a línea (no por bloques) para que una cabecera o cita
     seguida de una lista sin línea en blanco de por medio, como en
-    00-INDICE.md, no se trague todo como un párrafo."""
+    00-INDICE.md, no se trague todo como un párrafo. Necesita mirar una línea
+    por delante para reconocer tablas (cabecera + fila separadora), así que
+    itera con índice en vez de con un simple for.
+    """
+    lineas = md.strip().split("\n")
     salida, parrafo, lista = [], [], []
+    i, n = 0, len(lineas)
 
     def cerrar_parrafo():
         if parrafo:
@@ -114,30 +133,65 @@ def markdown_a_html(md: str) -> Markup:
             salida.append("<ul>" + "".join(f"<li>{_md_en_linea(l)}</li>" for l in lista) + "</ul>")
             lista.clear()
 
-    for linea in md.strip().split("\n"):
-        l = linea.strip()
+    def cerrar_todo():
+        cerrar_parrafo(); cerrar_lista()
+
+    while i < n:
+        l = lineas[i].strip()
         if not l:
-            cerrar_parrafo(); cerrar_lista()
+            cerrar_todo()
+            i += 1
             continue
+
         m = re.match(r"^(#{1,3})\s+(.*)$", l)
         if m:
-            cerrar_parrafo(); cerrar_lista()
+            cerrar_todo()
             nivel = len(m.group(1))
             salida.append(f"<h{nivel}>{_md_en_linea(m.group(2))}</h{nivel}>")
+            i += 1
             continue
+
+        if re.match(r"^(-{3,}|\*{3,})$", l):
+            cerrar_todo()
+            salida.append("<hr>")
+            i += 1
+            continue
+
         if l.startswith("> "):
-            cerrar_parrafo(); cerrar_lista()
+            cerrar_todo()
             salida.append(f"<blockquote>{_md_en_linea(l[2:].strip())}</blockquote>")
+            i += 1
             continue
+
+        if "|" in l and i + 1 < n and _SEPARADOR_TABLA.match(lineas[i + 1].strip()):
+            cerrar_todo()
+            cabecera = _celdas_tabla(l)
+            filas = []
+            i += 2
+            while i < n and lineas[i].strip() and "|" in lineas[i]:
+                filas.append(_celdas_tabla(lineas[i]))
+                i += 1
+            th = "".join(f"<th>{_md_en_linea(c)}</th>" for c in cabecera)
+            trs = "".join("<tr>" + "".join(f"<td>{_md_en_linea(c)}</td>" for c in fila) + "</tr>"
+                          for fila in filas)
+            salida.append(f"<table><thead><tr>{th}</tr></thead><tbody>{trs}</tbody></table>")
+            continue
+
         if l.startswith("- "):
             cerrar_parrafo()
             lista.append(l[2:].strip())
+            i += 1
             continue
+
         cerrar_lista()
         parrafo.append(l)
+        i += 1
 
-    cerrar_parrafo(); cerrar_lista()
+    cerrar_todo()
     return Markup("\n".join(salida))
+
+
+app.jinja_env.filters["markdown"] = markdown_a_html
 
 
 def elegir_fuentes(texto: str, extra_terminos: str = "") -> list:
@@ -359,10 +413,20 @@ Analiza el/los documento(s) contra el reglamento y devuelve, en este orden:
 
 
 def guardar(tipo: str, payload: dict) -> str:
-    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    ruta = SALIDAS / f"{ts}-{tipo}.json"
-    ruta.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return ruta.name
+    """Guarda la consulta/triaje/análisis suelto y devuelve su id
+    ("20260813-223416-triaje", sin extensión) para poder enlazarlo después
+    desde el historial."""
+    id_ = f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}-{tipo}"
+    (SALIDAS / f"{id_}.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return id_
+
+
+def _historial_ruta(id_: str) -> Path:
+    if not re.match(r"^\d{8}-\d{6}-[a-z]+$", id_ or ""):
+        return None
+    f = SALIDAS / f"{id_}.json"
+    return f if f.is_file() else None
 
 
 # --------------------------------------------------------------------------
@@ -427,9 +491,11 @@ def historial_carpeta(d: Path) -> list:
         if f.name == "_carpeta.json":
             continue
         try:
-            turnos.append(json.loads(f.read_text(encoding="utf-8")))
+            turno = json.loads(f.read_text(encoding="utf-8"))
         except Exception:
             continue
+        turno["id"] = f.stem
+        turnos.append(turno)
     return turnos
 
 
@@ -510,9 +576,9 @@ def preguntar():
     claves = elegir_fuentes(pregunta)
     ctx = montar_contexto(claves)
     resp = llamar(REGLAS, f"{ctx}\n\n<pregunta>\n{pregunta}\n</pregunta>")
-    guardar("consulta", {"pregunta": pregunta, "fuentes": claves, "respuesta": resp})
+    id_ = guardar("consulta", {"pregunta": pregunta, "fuentes": claves, "respuesta": resp})
     return render_template_string(PAGINA, vista="consulta", activa="consulta",
-                                  res={"titulo": pregunta, "cuerpo": resp, "fuentes": claves},
+                                  res={"id": id_, "titulo": pregunta, "cuerpo": resp, "fuentes": claves},
                                   estado=estado_reglamento(), actualizado=fecha_actualizacion(),
                                   historial=historial())
 
@@ -535,10 +601,10 @@ def triaje():
     claves = elegir_fuentes(pregunta)
     ctx = montar_contexto(claves)
     resp = llamar(REGLAS, f"{ctx}\n\n<pregunta>\n{pregunta}\n</pregunta>")
-    guardar("triaje", {"pregunta": pregunta, "titulo": tipo_producto,
-                       "fuentes": claves, "respuesta": resp})
+    id_ = guardar("triaje", {"pregunta": pregunta, "titulo": tipo_producto,
+                             "fuentes": claves, "respuesta": resp})
     return render_template_string(PAGINA, vista="triaje", activa="consulta",
-                                  res={"titulo": f"Triaje — {tipo_producto}", "cuerpo": resp,
+                                  res={"id": id_, "titulo": f"Triaje — {tipo_producto}", "cuerpo": resp,
                                        "fuentes": claves},
                                   estado=estado_reglamento(), actualizado=fecha_actualizacion(),
                                   historial=historial())
@@ -558,13 +624,36 @@ def analizar():
     prompt = prompt_analizar(ctx, "", documentos, rol, nota)
     resp = llamar(REGLAS, prompt, max_tokens=4000)
     nombres = [d["nombre"] for d in documentos]
-    guardar("analisis", {"documentos": nombres, "rol": rol,
-                         "nota": nota, "fuentes": claves, "respuesta": resp})
+    id_ = guardar("analisis", {"documentos": nombres, "rol": rol,
+                               "nota": nota, "fuentes": claves, "respuesta": resp})
     return render_template_string(PAGINA, vista="analisis", activa="consulta",
-                                  res={"titulo": ", ".join(d["nombre"] for d in documentos) or "Nota suelta",
+                                  res={"id": id_, "titulo": ", ".join(nombres) or "Nota suelta",
                                        "cuerpo": resp, "fuentes": claves},
                                   estado=estado_reglamento(), actualizado=fecha_actualizacion(),
                                   historial=historial())
+
+
+@app.route("/historial/<id_>", methods=["GET"])
+def historial_ver(id_):
+    f = _historial_ruta(id_)
+    if not f:
+        return redirect(url_for("home"))
+    d = json.loads(f.read_text(encoding="utf-8"))
+    titulo = d.get("titulo") or d.get("pregunta") or _nombre_documentos(d)
+    return render_template_string(PAGINA_HISTORIAL, activa="consulta",
+                                  estado=estado_reglamento(), actualizado=fecha_actualizacion(),
+                                  id_=id_, titulo=titulo, d=d)
+
+
+@app.route("/historial/<id_>.md", methods=["GET"])
+def historial_descargar(id_):
+    f = _historial_ruta(id_)
+    if not f:
+        return redirect(url_for("home"))
+    d = json.loads(f.read_text(encoding="utf-8"))
+    resp = app.response_class(d.get("respuesta", ""), mimetype="text/markdown")
+    resp.headers["Content-Disposition"] = f'attachment; filename="{id_}.md"'
+    return resp
 
 
 @app.route("/normativa", methods=["GET"])
@@ -623,6 +712,20 @@ def carpeta_ver(slug):
                                   estado=estado_reglamento(), actualizado=fecha_actualizacion(),
                                   carpeta={"slug": slug, **meta}, turnos=historial_carpeta(d),
                                   estados=ESTADOS)
+
+
+@app.route("/carpetas/<slug>/turno/<id_>.md", methods=["GET"])
+def carpeta_turno_descargar(slug, id_):
+    d = carpeta_dir(slug)
+    if not d or not re.match(r"^\d{8}-\d{6}-[a-z]+$", id_ or ""):
+        return redirect(url_for("carpetas"))
+    f = d / f"{id_}.json"
+    if not f.is_file():
+        return redirect(url_for("carpeta_ver", slug=slug))
+    turno = json.loads(f.read_text(encoding="utf-8"))
+    resp = app.response_class(turno.get("respuesta", ""), mimetype="text/markdown")
+    resp.headers["Content-Disposition"] = f'attachment; filename="{slug}-{id_}.md"'
+    return resp
 
 
 @app.route("/carpetas/<slug>/estado", methods=["POST"])
@@ -710,7 +813,7 @@ def historial():
             tipo = "triaje"
         else:
             tipo = "consulta"
-        out.append({"fecha": f.stem[:15].replace("-", " "), "tipo": tipo,
+        out.append({"id": f.stem, "fecha": f.stem[:15].replace("-", " "), "tipo": tipo,
                     "que": d.get("titulo") or d.get("pregunta") or _nombre_documentos(d)})
     return out
 
@@ -746,7 +849,9 @@ BASE_HEAD = """<!doctype html><html lang="es"><meta charset="utf-8">
    background:#fbfbfc;border:1px solid #e3e6e8;border-radius:3px;padding:14px;overflow-x:auto}
  .ref{display:inline-block;font:11px ui-monospace,monospace;background:#eceff1;
    color:#39434b;padding:2px 7px;border-radius:2px;margin:2px 3px 0 0}
- .hist{font-size:12.5px;color:#5a646c;border-top:1px solid #e3e6e8;padding:6px 0}
+ .hist{display:block;font-size:12.5px;color:#5a646c;border-top:1px solid #e3e6e8;
+   padding:6px 0;text-decoration:none}
+ .hist:hover{color:#16181a;background:#f8f9fa}
  .aviso{background:#fff6e5;border-left:3px solid #c98a12;padding:10px 12px;font-size:13px}
  .lista{display:flex;flex-direction:column;gap:2px}
  .itm{color:#16181a;text-decoration:none;font-size:13.5px;padding:5px 6px;border-radius:3px}
@@ -765,6 +870,14 @@ BASE_HEAD = """<!doctype html><html lang="es"><meta charset="utf-8">
  .md blockquote{margin:0 0 12px;padding:4px 12px;border-left:3px solid #c8cfd4;
    color:#5a646c;font-size:13.5px}
  .md ul{margin:0 0 12px;padding-left:20px} .md li{font-size:14px;margin:2px 0}
+ .md hr{border:0;border-top:1px solid #e3e6e8;margin:16px 0}
+ .md table{border-collapse:collapse;width:100%;margin:0 0 14px;font-size:13px}
+ .md th,.md td{border:1px solid #e3e6e8;padding:6px 9px;text-align:left;vertical-align:top}
+ .md th{background:#f4f5f6;font-weight:700}
+ .acciones{display:flex;align-items:center;gap:8px;margin-top:8px}
+ .acciones .copiar{margin-top:0}
+ .descarga{font-size:12.5px;color:#5a646c;text-decoration:none;padding:6px 4px}
+ .descarga:hover{color:#16181a;text-decoration:underline}
 </style>
 <header>
   <div class="cab">
@@ -778,10 +891,10 @@ BASE_HEAD = """<!doctype html><html lang="es"><meta charset="utf-8">
   <span>{{ estado }}{% if actualizado %} · actualizado {{ actualizado }}{% endif %}</span>
 </header>
 <script>
-function copiarBloque(id, btn) {
+function copiarCruda(id, btn) {
   var el = document.getElementById(id);
   if (!el || !navigator.clipboard) return;
-  navigator.clipboard.writeText(el.innerText).then(function () {
+  navigator.clipboard.writeText(el.value).then(function () {
     var original = btn.textContent;
     btn.textContent = "Copiado";
     setTimeout(function () { btn.textContent = original; }, 1500);
@@ -802,8 +915,12 @@ PAGINA = BASE_HEAD + """
   <h2>{{ res.titulo }}</h2>
   <p class="ayuda">Fuentes usadas:
     {% for f in res.fuentes %}<span class="ref">{{ f }}</span>{% endfor %}</p>
-  <div class="res" id="resultado">{{ res.cuerpo }}</div>
-  <button type="button" class="copiar" onclick="copiarBloque('resultado', this)">Copiar respuesta</button>
+  <div class="md">{{ res.cuerpo|markdown }}</div>
+  <textarea id="cruda-resultado" hidden>{{ res.cuerpo }}</textarea>
+  <div class="acciones">
+    <button type="button" class="copiar" onclick="copiarCruda('cruda-resultado', this)">Copiar markdown</button>
+    {% if res.id %}<a class="descarga" href="{{ url_for('historial_descargar', id_=res.id) }}">Descargar .md</a>{% endif %}
+  </div>
 </div>
 {% endif %}
 
@@ -870,11 +987,34 @@ PAGINA = BASE_HEAD + """
 <div class="caja">
   <h2>Últimos trabajos</h2>
   {% for h in historial %}
-  <div class="hist">{{ h.fecha }} · {{ h.tipo }} · {{ h.que[:90] }}</div>
+  <a class="hist" href="{{ url_for('historial_ver', id_=h.id) }}">{{ h.fecha }} · {{ h.tipo }} · {{ h.que[:90] }}</a>
   {% endfor %}
   <p class="ayuda" style="margin-top:10px">Guardados en <code>salidas/</code> como JSON.</p>
 </div>
 {% endif %}
+
+</main></html>"""
+
+PAGINA_HISTORIAL = BASE_HEAD + """
+<main>
+
+<div class="caja">
+  <p class="ayuda"><a href="{{ url_for('home') }}">&larr; Consultar</a></p>
+  <h2>{{ titulo }}</h2>
+  <p class="ayuda">
+    {{ id_[:15].replace('-', ' ') }}
+    {% if d.rol %}· Rol: {{ d.rol }}{% endif %}
+    {% if d.nota %}· {{ d.nota }}{% endif %}
+  </p>
+  <p class="ayuda">Fuentes usadas:
+    {% for f in d.fuentes %}<span class="ref">{{ f }}</span>{% endfor %}</p>
+  <div class="md">{{ d.respuesta|markdown }}</div>
+  <textarea id="cruda-resultado" hidden>{{ d.respuesta }}</textarea>
+  <div class="acciones">
+    <button type="button" class="copiar" onclick="copiarCruda('cruda-resultado', this)">Copiar markdown</button>
+    <a class="descarga" href="{{ url_for('historial_descargar', id_=id_) }}">Descargar .md</a>
+  </div>
+</div>
 
 </main></html>"""
 
@@ -1010,8 +1150,12 @@ PAGINA_CARPETA = BASE_HEAD + """
   {% endif %}
   <p class="ayuda">Fuentes:
     {% for f in t.fuentes %}<span class="ref">{{ f }}</span>{% endfor %}</p>
-  <div class="res" id="turno-{{ loop.index }}">{{ t.respuesta }}</div>
-  <button type="button" class="copiar" onclick="copiarBloque('turno-{{ loop.index }}', this)">Copiar respuesta</button>
+  <div class="md">{{ t.respuesta|markdown }}</div>
+  <textarea id="cruda-turno-{{ loop.index }}" hidden>{{ t.respuesta }}</textarea>
+  <div class="acciones">
+    <button type="button" class="copiar" onclick="copiarCruda('cruda-turno-{{ loop.index }}', this)">Copiar markdown</button>
+    <a class="descarga" href="{{ url_for('carpeta_turno_descargar', slug=carpeta.slug, id_=t.id) }}">Descargar .md</a>
+  </div>
   <p class="ayuda" style="margin-top:8px">{{ t.fecha[:16].replace('T', ' ') }}</p>
 </div>
 {% endfor %}
