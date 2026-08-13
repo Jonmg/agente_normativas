@@ -2,9 +2,11 @@
 """
 app.py — herramienta local de conformidad de envases (Reglamento UE 2025/40).
 
-Dos cosas y nada más:
+Tres cosas:
   1. Preguntar al reglamento.
   2. Subir un documento (informe de proveedor, correo, ficha) y ver qué falta.
+  3. Carpetas: agrupar preguntas y documentos de un mismo caso, con memoria
+     del hilo entre turnos, como una conversación.
 
 El "ground truth" son los ficheros markdown de ./reglamento/. No hay base de datos:
 las consultas y los análisis se guardan como ficheros en ./salidas/.
@@ -17,6 +19,7 @@ import re
 import json
 import html
 import datetime
+import unicodedata
 from pathlib import Path
 
 from flask import Flask, request, render_template_string, redirect, url_for
@@ -26,7 +29,9 @@ import anthropic
 RAIZ = Path(__file__).parent
 REG = RAIZ / "reglamento"
 SALIDAS = RAIZ / "salidas"
+CARPETAS = SALIDAS / "carpetas"
 SALIDAS.mkdir(exist_ok=True)
+CARPETAS.mkdir(exist_ok=True, parents=True)
 
 MODELO = os.getenv("PPWR_MODELO", "claude-sonnet-4-6")
 cliente = anthropic.Anthropic()
@@ -211,9 +216,8 @@ Escribe en español, directo y sin relleno."""
 # --------------------------------------------------------------------------
 # Lectura de lo que sube el usuario
 # --------------------------------------------------------------------------
-def leer_subida(fs) -> str:
-    datos = fs.read()
-    nombre = fs.filename.lower()
+def leer_subida_bytes(datos: bytes, nombre: str) -> str:
+    nombre = nombre.lower()
     if nombre.endswith(".pdf"):
         try:
             from pypdf import PdfReader
@@ -237,11 +241,131 @@ def leer_subida(fs) -> str:
     return datos.decode("utf-8", "replace")
 
 
+def leer_subida(fs) -> str:
+    return leer_subida_bytes(fs.read(), fs.filename)
+
+
+def prompt_analizar(ctx: str, hilo: str, texto: str, nombre: str, rol: str, nota: str) -> str:
+    return f"""{hilo}{ctx}
+
+<documento nombre="{nombre}">
+{texto}
+</documento>
+
+<contexto_empresa>
+Rol legal para esta referencia: {rol}
+Nota de quien lo sube: {nota or "ninguna"}
+</contexto_empresa>
+
+Analiza el documento contra el reglamento y devuelve, en este orden:
+
+1. QUÉ ES — una línea: qué documento es y de quién.
+2. QUÉ APORTA — evidencias que sí cubre, con el artículo que satisface cada una.
+3. QUÉ FALTA — tabla: requisito | artículo | por qué falta | qué pedir exactamente.
+4. QUÉ NO CUADRA — afirmaciones sin respaldo documental, contradicciones o exenciones
+   invocadas sin justificación.
+5. SIGUIENTE PASO — borrador de la respuesta al proveedor, listo para copiar, pidiendo
+   solo lo del punto 3.
+"""
+
+
 def guardar(tipo: str, payload: dict) -> str:
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     ruta = SALIDAS / f"{ts}-{tipo}.json"
     ruta.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return ruta.name
+
+
+# --------------------------------------------------------------------------
+# Carpetas — un caso o una duda con memoria de hilo entre turnos, como una
+# conversación. Nombre libre, sin obligar a colgarlo de un proveedor: hay
+# dudas normativas que no tienen proveedor detrás. El documento original que
+# se sube se guarda dentro de la carpeta (nunca se versiona: salidas/ está
+# en .gitignore), porque sin él no hay con qué respaldar después una
+# afirmación de proveedor.
+# --------------------------------------------------------------------------
+def _slug_carpeta(nombre: str) -> str:
+    s = unicodedata.normalize("NFKD", nombre).encode("ascii", "ignore").decode()
+    s = re.sub(r"[^\w\s-]", "", s).strip().lower()
+    s = re.sub(r"[\s_-]+", "-", s)[:50]
+    return s or "carpeta"
+
+
+def crear_carpeta(nombre: str) -> str:
+    base = _slug_carpeta(nombre)
+    slug, i = base, 2
+    while (CARPETAS / slug).exists():
+        slug = f"{base}-{i}"
+        i += 1
+    d = CARPETAS / slug
+    d.mkdir(parents=True)
+    (d / "_carpeta.json").write_text(
+        json.dumps({"nombre": nombre,
+                    "creada": datetime.datetime.now().isoformat(timespec="seconds")},
+                   ensure_ascii=False, indent=2), encoding="utf-8")
+    return slug
+
+
+def carpeta_dir(slug: str):
+    if not slug or not re.match(r"^[a-z0-9-]+$", slug):
+        return None
+    d = CARPETAS / slug
+    return d if (d / "_carpeta.json").exists() else None
+
+
+def historial_carpeta(d: Path) -> list:
+    turnos = []
+    for f in sorted(d.glob("*.json")):
+        if f.name == "_carpeta.json":
+            continue
+        try:
+            turnos.append(json.loads(f.read_text(encoding="utf-8")))
+        except Exception:
+            continue
+    return turnos
+
+
+def contexto_previo(turnos: list) -> str:
+    if not turnos:
+        return ""
+    piezas = []
+    for t in turnos:
+        if t.get("tipo") == "analisis":
+            piezas.append(
+                f'<turno_anterior tipo="documento" nombre="{t.get("documento", "")}">\n'
+                f'Rol: {t.get("rol", "")}. Nota: {t.get("nota", "")}\n\n'
+                f'{t.get("respuesta", "")}\n</turno_anterior>')
+        else:
+            piezas.append(
+                f'<turno_anterior tipo="pregunta">\n{t.get("pregunta", "")}\n\n'
+                f'{t.get("respuesta", "")}\n</turno_anterior>')
+    return "<hilo_previo>\n" + "\n\n".join(piezas) + "\n</hilo_previo>\n\n"
+
+
+def guardar_turno(d: Path, tipo: str, payload: dict) -> str:
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    payload = {"tipo": tipo, "fecha": datetime.datetime.now().isoformat(timespec="seconds"), **payload}
+    (d / f"{ts}-{tipo}.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return ts
+
+
+def listar_carpetas() -> list:
+    out = []
+    for d in sorted(CARPETAS.iterdir()) if CARPETAS.exists() else []:
+        meta_f = d / "_carpeta.json"
+        if not d.is_dir() or not meta_f.exists():
+            continue
+        try:
+            meta = json.loads(meta_f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        turnos = historial_carpeta(d)
+        ultima = max([t.get("fecha", "") for t in turnos], default=meta.get("creada", ""))
+        out.append({"slug": d.name, "nombre": meta.get("nombre", d.name),
+                    "turnos": len(turnos), "ultima": ultima[:16].replace("T", " ")})
+    out.sort(key=lambda x: x["ultima"], reverse=True)
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -281,27 +405,7 @@ def analizar():
 
     claves = elegir_fuentes(texto[:8000], nota)
     ctx = montar_contexto(claves)
-    prompt = f"""{ctx}
-
-<documento nombre="{fs.filename if fs else 'nota'}">
-{texto}
-</documento>
-
-<contexto_empresa>
-Rol legal para esta referencia: {rol}
-Nota de quien lo sube: {nota or "ninguna"}
-</contexto_empresa>
-
-Analiza el documento contra el reglamento y devuelve, en este orden:
-
-1. QUÉ ES — una línea: qué documento es y de quién.
-2. QUÉ APORTA — evidencias que sí cubre, con el artículo que satisface cada una.
-3. QUÉ FALTA — tabla: requisito | artículo | por qué falta | qué pedir exactamente.
-4. QUÉ NO CUADRA — afirmaciones sin respaldo documental, contradicciones o exenciones
-   invocadas sin justificación.
-5. SIGUIENTE PASO — borrador de la respuesta al proveedor, listo para copiar, pidiendo
-   solo lo del punto 3.
-"""
+    prompt = prompt_analizar(ctx, "", texto, fs.filename if fs else "nota", rol, nota)
     resp = llamar(REGLAS, prompt, max_tokens=4000)
     guardar("analisis", {"documento": fs.filename if fs else "nota", "rol": rol,
                          "nota": nota, "fuentes": claves, "respuesta": resp})
@@ -336,6 +440,79 @@ def normativa_articulo(clave):
     return render_template_string(PAGINA_ARTICULO, activa="normativa",
                                   estado=estado_reglamento(), actualizado=fecha_actualizacion(),
                                   clave=clave, titulo=titulo, contenido_html=markdown_a_html(contenido))
+
+
+@app.route("/carpetas", methods=["GET"])
+def carpetas():
+    return render_template_string(PAGINA_CARPETAS, activa="carpetas",
+                                  estado=estado_reglamento(), actualizado=fecha_actualizacion(),
+                                  carpetas=listar_carpetas())
+
+
+@app.route("/carpetas/nueva", methods=["POST"])
+def carpeta_nueva():
+    nombre = request.form.get("nombre", "").strip()
+    if not nombre:
+        return redirect(url_for("carpetas"))
+    slug = crear_carpeta(nombre)
+    return redirect(url_for("carpeta_ver", slug=slug))
+
+
+@app.route("/carpetas/<slug>", methods=["GET"])
+def carpeta_ver(slug):
+    d = carpeta_dir(slug)
+    if not d:
+        return redirect(url_for("carpetas"))
+    meta = json.loads((d / "_carpeta.json").read_text(encoding="utf-8"))
+    return render_template_string(PAGINA_CARPETA, activa="carpetas",
+                                  estado=estado_reglamento(), actualizado=fecha_actualizacion(),
+                                  carpeta={"slug": slug, **meta}, turnos=historial_carpeta(d))
+
+
+@app.route("/carpetas/<slug>/preguntar", methods=["POST"])
+def carpeta_preguntar(slug):
+    d = carpeta_dir(slug)
+    if not d:
+        return redirect(url_for("carpetas"))
+    pregunta = request.form.get("pregunta", "").strip()
+    if not pregunta:
+        return redirect(url_for("carpeta_ver", slug=slug))
+    hilo = contexto_previo(historial_carpeta(d))
+    claves = elegir_fuentes(pregunta)
+    ctx = montar_contexto(claves)
+    resp = llamar(REGLAS, f"{hilo}{ctx}\n\n<pregunta>\n{pregunta}\n</pregunta>")
+    guardar_turno(d, "pregunta", {"pregunta": pregunta, "fuentes": claves, "respuesta": resp})
+    return redirect(url_for("carpeta_ver", slug=slug))
+
+
+@app.route("/carpetas/<slug>/analizar", methods=["POST"])
+def carpeta_analizar(slug):
+    d = carpeta_dir(slug)
+    if not d:
+        return redirect(url_for("carpetas"))
+    fs = request.files.get("documento")
+    nota = request.form.get("nota", "").strip()
+    rol = request.form.get("rol", "sin especificar")
+    datos = fs.read() if fs and fs.filename else b""
+    texto = leer_subida_bytes(datos, fs.filename) if datos else ""
+    if not texto and not nota:
+        return redirect(url_for("carpeta_ver", slug=slug))
+    texto = texto[:60000]
+
+    nombre_doc = None
+    if datos:
+        ts_fichero = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        nombre_doc = f"{ts_fichero}-{fs.filename}"
+        (d / nombre_doc).write_bytes(datos)
+
+    hilo = contexto_previo(historial_carpeta(d))
+    claves = elegir_fuentes(texto[:8000], nota)
+    ctx = montar_contexto(claves)
+    prompt = prompt_analizar(ctx, hilo, texto, fs.filename if fs else "nota", rol, nota)
+    resp = llamar(REGLAS, prompt, max_tokens=4000)
+    guardar_turno(d, "analisis", {"documento": fs.filename if fs else "nota", "fichero": nombre_doc,
+                                  "rol": rol, "nota": nota, "fuentes": claves, "respuesta": resp})
+    return redirect(url_for("carpeta_ver", slug=slug))
 
 
 def estado_reglamento():
@@ -412,6 +589,7 @@ BASE_HEAD = """<!doctype html><html lang="es"><meta charset="utf-8">
     <nav class="nav">
       <a href="{{ url_for('home') }}" class="{{ 'act' if activa=='consulta' else '' }}">Consultar</a>
       <a href="{{ url_for('normativa') }}" class="{{ 'act' if activa=='normativa' else '' }}">Normativa</a>
+      <a href="{{ url_for('carpetas') }}" class="{{ 'act' if activa=='carpetas' else '' }}">Carpetas</a>
     </nav>
   </div>
   <span>{{ estado }}{% if actualizado %} · actualizado {{ actualizado }}{% endif %}</span>
@@ -521,6 +699,94 @@ PAGINA_ARTICULO = BASE_HEAD + """
 <div class="caja">
   <p class="ayuda"><a href="{{ url_for('normativa') }}">&larr; Normativa</a></p>
   <div class="md">{{ contenido_html }}</div>
+</div>
+
+</main></html>"""
+
+PAGINA_CARPETAS = BASE_HEAD + """
+<main>
+
+<div class="caja">
+  <h2>Nueva carpeta</h2>
+  <p class="ayuda">Un caso, una duda, un proveedor concreto. Todo lo que preguntes o subas
+    dentro se recuerda entre turnos, como una conversación.</p>
+  <form method="post" action="{{ url_for('carpeta_nueva') }}">
+    <input type="text" name="nombre" placeholder="Proveedor X — blíster PVC" required>
+    <button>Crear carpeta</button>
+  </form>
+</div>
+
+<div class="caja">
+  <h2>Carpetas abiertas</h2>
+  {% if carpetas %}
+  <div class="lista">
+    {% for c in carpetas %}
+    <a class="itm" href="{{ url_for('carpeta_ver', slug=c.slug) }}">{{ c.nombre }}
+      <span class="ref">{{ c.turnos }} turno{{ 's' if c.turnos != 1 else '' }}</span>
+      <span class="ref">{{ c.ultima }}</span></a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="ayuda">Ninguna todavía.</p>
+  {% endif %}
+</div>
+
+</main></html>"""
+
+PAGINA_CARPETA = BASE_HEAD + """
+<main>
+
+<div class="caja">
+  <p class="ayuda"><a href="{{ url_for('carpetas') }}">&larr; Carpetas</a></p>
+  <h2>{{ carpeta.nombre }}</h2>
+  <p class="ayuda">Creada {{ carpeta.creada[:16].replace('T', ' ') }}</p>
+</div>
+
+{% for t in turnos %}
+<div class="caja">
+  <h2>{{ t.pregunta if t.tipo == 'pregunta' else (t.documento or 'Nota suelta') }}</h2>
+  {% if t.tipo == 'analisis' %}
+  <p class="ayuda">Rol: {{ t.rol }}{% if t.nota %} · {{ t.nota }}{% endif %}</p>
+  {% endif %}
+  <p class="ayuda">Fuentes:
+    {% for f in t.fuentes %}<span class="ref">{{ f }}</span>{% endfor %}</p>
+  <div class="res">{{ t.respuesta }}</div>
+  <p class="ayuda" style="margin-top:8px">{{ t.fecha[:16].replace('T', ' ') }}</p>
+</div>
+{% endfor %}
+
+<div class="caja">
+  <h2>Preguntar en esta carpeta</h2>
+  <p class="ayuda">Recuerda todo lo hablado antes en esta misma carpeta.</p>
+  <form method="post" action="{{ url_for('carpeta_preguntar', slug=carpeta.slug) }}">
+    <textarea name="pregunta" placeholder="Sigue la conversación..."></textarea>
+    <button>Preguntar</button>
+  </form>
+</div>
+
+<div class="caja">
+  <h2>Subir documento a esta carpeta</h2>
+  <p class="ayuda">El documento original se guarda dentro de la carpeta, junto con el análisis.</p>
+  <form method="post" action="{{ url_for('carpeta_analizar', slug=carpeta.slug) }}" enctype="multipart/form-data">
+    <input type="file" name="documento" accept=".pdf,.docx,.txt,.md,.eml">
+    <div class="fila">
+      <div>
+        <label>Rol legal en esta referencia</label>
+        <select name="rol">
+          <option>Importador (fabricante fuera de la UE)</option>
+          <option>Adquirente intracomunitario</option>
+          <option>Envasador propio</option>
+          <option>Distribuidor</option>
+          <option>Sin determinar</option>
+        </select>
+      </div>
+      <div>
+        <label>Contexto o duda concreta</label>
+        <input type="text" name="nota" placeholder="Estuche de cartón, venta a consumidor">
+      </div>
+    </div>
+    <button>Revisar</button>
+  </form>
 </div>
 
 </main></html>"""

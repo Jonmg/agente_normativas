@@ -79,7 +79,14 @@ El rol legal importa: Medop es importador en unas referencias, adquirente
 intracomunitario en otras y envasador propio en otras. Las obligaciones cambian.
 Por eso se pide en cada revisión en lugar de fijarlo una vez.
 
+**Carpetas** — un caso o una duda con memoria de hilo entre turnos, como una
+conversación. Nombre libre (no hace falta que cuelgue de un proveedor: hay dudas
+puramente normativas). Cada pregunta o documento nuevo dentro de la carpeta recibe
+como contexto todo lo hablado antes en esa misma carpeta. El documento original que
+subas se guarda en `salidas/carpetas/<carpeta>/`, no solo el texto extraído.
+
 Todo queda en `salidas/` como JSON con fecha, fuentes usadas y respuesta.
+Ninguna carpeta ni salida se versiona (`salidas/` está en `.gitignore`).
 
 ## Pruebas
 

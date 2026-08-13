@@ -11,6 +11,7 @@ entrada vacía, que redirige sin invocar el modelo.
 """
 import os
 import unittest
+from pathlib import Path
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "sk-ant-pruebas-sin-red")
 
@@ -142,6 +143,82 @@ class TestRutasWeb(unittest.TestCase):
     def test_analizar_vacio_redirige_sin_llamar_api(self):
         r = self.c.post("/analizar", data={})
         self.assertEqual(r.status_code, 302)
+
+
+class TestCarpetas(unittest.TestCase):
+    """No llaman a la API real: sustituyen app.llamar por una función que
+    devuelve texto fijo y registra el prompt recibido, para poder comprobar
+    que el hilo previo se pasa como contexto sin gastar tokens."""
+
+    def setUp(self):
+        import tempfile
+        app.app.testing = True
+        self.c = app.app.test_client()
+        self.prompts = []
+        self._llamar_original = app.llamar
+        app.llamar = lambda system, prompt, max_tokens=3000: (
+            self.prompts.append(prompt) or f"respuesta simulada #{len(self.prompts)}")
+        # aislar del salidas/carpetas/ real: no ensuciar carpetas de verdad
+        self._carpetas_original = app.CARPETAS
+        self._tmp = tempfile.mkdtemp()
+        app.CARPETAS = Path(self._tmp)
+
+    def tearDown(self):
+        import shutil
+        app.llamar = self._llamar_original
+        app.CARPETAS = self._carpetas_original
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _crear_carpeta(self, nombre="Carpeta de prueba"):
+        r = self.c.post("/carpetas/nueva", data={"nombre": nombre})
+        return r.headers["Location"].rsplit("/", 1)[-1]
+
+    def test_crear_carpeta_redirige_a_su_vista(self):
+        slug = self._crear_carpeta()
+        r = self.c.get(f"/carpetas/{slug}")
+        self.assertEqual(r.status_code, 200)
+
+    def test_crear_carpeta_sin_nombre_no_crea_nada(self):
+        antes = len(app.listar_carpetas())
+        self.c.post("/carpetas/nueva", data={"nombre": ""})
+        self.assertEqual(len(app.listar_carpetas()), antes)
+
+    def test_nombres_repetidos_generan_slugs_distintos(self):
+        s1 = self._crear_carpeta("Duda repetida")
+        s2 = self._crear_carpeta("Duda repetida")
+        self.assertNotEqual(s1, s2)
+
+    def test_segundo_turno_incluye_el_hilo_previo_en_el_prompt(self):
+        slug = self._crear_carpeta()
+        self.c.post(f"/carpetas/{slug}/preguntar", data={"pregunta": "Primera pregunta"})
+        self.c.post(f"/carpetas/{slug}/preguntar", data={"pregunta": "Segunda pregunta"})
+        self.assertNotIn("<hilo_previo>", self.prompts[0])
+        self.assertIn("<hilo_previo>", self.prompts[1])
+        self.assertIn("Primera pregunta", self.prompts[1])
+
+    def test_documento_subido_se_guarda_en_la_carpeta(self):
+        import io
+        slug = self._crear_carpeta()
+        self.c.post(f"/carpetas/{slug}/analizar", data={
+            "documento": (io.BytesIO(b"contenido de prueba"), "declaracion.txt"),
+            "rol": "Envasador propio", "nota": "",
+        })
+        guardados = list(app.carpeta_dir(slug).glob("*.txt"))
+        self.assertEqual(len(guardados), 1)
+        self.assertEqual(guardados[0].read_bytes(), b"contenido de prueba")
+
+    def test_pregunta_vacia_no_llama_al_modelo(self):
+        slug = self._crear_carpeta()
+        self.c.post(f"/carpetas/{slug}/preguntar", data={"pregunta": ""})
+        self.assertEqual(self.prompts, [])
+
+    def test_carpeta_inexistente_redirige_al_listado(self):
+        r = self.c.get("/carpetas/no-existe-esta-carpeta")
+        self.assertEqual(r.status_code, 302)
+
+    def test_slug_con_caracteres_invalidos_no_se_acepta(self):
+        self.assertIsNone(app.carpeta_dir("../../etc"))
+        self.assertIsNone(app.carpeta_dir("con espacios"))
 
 
 class TestTroceadoReglamento(unittest.TestCase):
