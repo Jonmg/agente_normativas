@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block titulo %}Crear cuenta{% endblock %}
+{% block contenido %}
+<div class="contenedor estrecho" style="padding:0">
+  <div class="tarjeta">
+    <h1>Crea tu cuenta de paciente</h1>
+    <p class="suave">Para pedir cita y que la clínica pueda contactarte. ¿Eres una clínica? <a href="{{ url_for('registro_clinica') }}">Regístrala aquí</a>.</p>
+    <form method="post">{{ csrf() }}
+      <input type="hidden" name="siguiente" value="{{ siguiente }}">
+      <label for="nombre">Nombre y apellidos</label>
+      <input id="nombre" name="nombre" type="text" required autocomplete="name" value="{{ request.form.nombre }}">
+      <div class="fila">
+        <div><label for="telefono">Teléfono</label>
+          <input id="telefono" name="telefono" type="tel" required autocomplete="tel" value="{{ request.form.telefono }}"></div>
+        <div><label for="codigo_postal">Código postal</label>
+          <input id="codigo_postal" name="codigo_postal" type="text" inputmode="numeric" maxlength="5" required value="{{ request.form.codigo_postal }}"></div>
+      </div>
+      <p class="ayuda">Usamos el código postal para mostrarte primero las clínicas cercanas.</p>
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" required autocomplete="email" value="{{ request.form.email }}">
+      <label for="clave">Contraseña</label>
+      <input id="clave" name="clave" type="password" required minlength="8" autocomplete="new-password">
+      <p class="ayuda">Mínimo 8 caracteres.</p>
+      <label class="casilla"><input type="checkbox" name="acepto" value="1" required>
+        Acepto que las clínicas a las que pida cita o escriba vean mi nombre, teléfono y email.</label>
+      <button style="width:100%;margin-top:16px">Crear cuenta</button>
+    </form>
+    <p class="pequeno suave" style="margin-top:12px">¿Ya tienes cuenta? <a href="{{ url_for('entrar', siguiente=siguiente) }}">Entra</a></p>
+  </div>
+</div>
+{% endblock %}

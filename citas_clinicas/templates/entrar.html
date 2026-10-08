@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block titulo %}Entrar{% endblock %}
+{% block contenido %}
+<div class="contenedor estrecho" style="padding:0">
+  <div class="tarjeta">
+    <h1>Entrar</h1>
+    <form method="post">{{ csrf() }}
+      <input type="hidden" name="siguiente" value="{{ siguiente }}">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" required autocomplete="email" value="{{ request.form.email }}">
+      <label for="clave">Contraseña</label>
+      <input id="clave" name="clave" type="password" required autocomplete="current-password">
+      <button style="width:100%;margin-top:16px">Entrar</button>
+    </form>
+    <p class="pequeno suave" style="margin-top:12px">¿No tienes cuenta?
+      <a href="{{ url_for('registro', siguiente=siguiente) }}">Paciente</a> ·
+      <a href="{{ url_for('registro_clinica') }}">Clínica</a></p>
+  </div>
+</div>
+{% endblock %}

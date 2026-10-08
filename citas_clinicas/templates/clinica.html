@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block titulo %}{{ c.nombre }}{% endblock %}
+{% block clase_main %}{% endblock %}
+{% block contenido %}
+<section class="portada" style="--acento: {{ c.color }}">
+  <div class="contenedor" style="max-width:1080px;margin:0 auto;padding-top:28px">
+    {% if c.foto %}<img class="foto" src="{{ url_for('subida', nombre=c.foto) }}" alt="{{ c.nombre }}">
+    {% else %}<div class="foto">{{ TIPOS[c.tipo][1] }}</div>{% endif %}
+    <div>
+      <div class="pequeno" style="opacity:.85">{{ TIPOS[c.tipo][1] }} {{ TIPOS[c.tipo][0] }}{% if distancia %} · {{ distancia }}{% endif %}</div>
+      <h1 style="margin:4px 0">{{ c.nombre }}</h1>
+      {% if c.eslogan %}<p style="margin:0 0 6px;font-size:1.1rem">{{ c.eslogan }}</p>{% endif %}
+      <div class="pequeno">
+        {% if media.n %}<span class="estrellas">★</span> {{ '%.1f'|format(media.m) }} · {{ media.n }} valoraciones · {% endif %}
+        📍 {{ c.direccion }}{% if c.direccion %}, {% endif %}{{ c.codigo_postal }} {{ c.ciudad }}
+      </div>
+      <div class="acciones">
+        <a class="boton" href="#reservar">📅 Pedir cita</a>
+        {% if c.telefono %}<a class="boton" href="tel:{{ c.telefono }}">📞 Llamar · {{ c.telefono }}</a>{% endif %}
+        <a class="boton" href="#mensaje">✉️ Dejar mensaje</a>
+        <a class="boton" target="_blank" rel="noopener"
+           href="https://www.google.com/maps/search/?api=1&query={{ (c.direccion ~ ' ' ~ c.codigo_postal ~ ' ' ~ c.ciudad)|urlencode }}">🗺️ Cómo llegar</a>
+      </div>
+      {% if not c.activa %}<p class="aviso error" style="margin-top:12px">Ficha oculta: los pacientes no la ven. Actívala en «Ficha».</p>{% endif %}
+    </div>
+  </div>
+</section>
+
+<div class="contenedor" style="--acento: {{ c.color }}">
+  <div class="dos">
+    <div>
+      <section class="tarjeta" id="reservar">
+        <h2>Pedir cita</h2>
+        {% if not servicios %}
+          <p class="suave">Esta clínica aún no ha publicado servicios para reserva online. Llama o deja un mensaje.</p>
+        {% else %}
+          <h3>1. ¿Qué servicio necesitas?</h3>
+          {% for s in servicios %}
+            <a class="servicio-op {% if servicio and s.id == servicio.id %}activo{% endif %}"
+               href="{{ url_for('clinica', cid=c.id, servicio=s.id, semana=semana) }}#reservar">
+              <span><b>{{ s.nombre }}</b>{% if s.descripcion %}<br><span class="suave pequeno">{{ s.descripcion }}</span>{% endif %}</span>
+              <span class="pequeno" style="white-space:nowrap;text-align:right">{{ s.duracion }} min<br>
+                {% if s.precio is none %}—{% elif s.precio == 0 %}<b>Gratis</b>{% else %}<b>{{ '%.0f'|format(s.precio) }} €</b>{% endif %}</span>
+            </a>
+          {% endfor %}
+
+          <h3 style="margin-top:20px">2. Elige día y hora</h3>
+          <div class="fila" style="justify-content:space-between;margin-bottom:10px">
+            <span class="suave pequeno">{% if servicio %}Huecos para «{{ servicio.nombre }}» ({{ servicio.duracion }} min){% else %}Elige un servicio para ver los huecos en los que cabe{% endif %}</span>
+            <span style="flex:0 0 auto">
+              {% if semana > 0 %}<a class="boton secundario pequeno" href="{{ url_for('clinica', cid=c.id, servicio=servicio.id if servicio else None, semana=semana-1) }}#reservar">← Anterior</a>{% endif %}
+              {% if semana < 7 %}<a class="boton secundario pequeno" href="{{ url_for('clinica', cid=c.id, servicio=servicio.id if servicio else None, semana=semana+1) }}#reservar">Siguiente →</a>{% endif %}
+            </span>
+          </div>
+          <div class="semana">
+            {% for d, horas in huecos %}
+              <div class="dia">
+                <h4>{{ d|fecha_corta }}</h4>
+                <div class="horas">
+                {% for h in horas %}
+                  {% if servicio %}<a class="hueco" href="{{ url_for('reservar', cid=c.id, servicio=servicio.id, fecha=d.isoformat(), hora=h) }}">{{ h }}</a>
+                  {% else %}<span class="hueco" style="opacity:.6">{{ h }}</span>{% endif %}
+                {% else %}<div class="vacio">—</div>{% endfor %}
+                </div>
+              </div>
+            {% endfor %}
+          </div>
+          <p class="ayuda" style="margin-top:10px">
+            {% if c.confirmacion_automatica %}✅ Esta clínica confirma las citas al instante.
+            {% else %}La clínica revisa cada solicitud y te la confirma; lo verás en «Mis citas».{% endif %}
+          </p>
+        {% endif %}
+      </section>
+
+      {% if c.descripcion %}
+      <section class="tarjeta">
+        <h2>Sobre {{ c.nombre }}</h2>
+        <p style="white-space:pre-line">{{ c.descripcion }}</p>
+        {% if caract %}<ul class="etiquetas">{% for k in caract %}<li class="etiqueta">{{ CARACTERISTICAS[k] }}</li>{% endfor %}</ul>{% endif %}
+      </section>
+      {% endif %}
+
+      {% if valoraciones %}
+      <section class="tarjeta">
+        <h2>Lo que dicen los pacientes</h2>
+        {% for v in valoraciones %}
+          <div class="cita"><div><span class="estrellas">{{ '★' * v.puntuacion }}{{ '☆' * (5 - v.puntuacion) }}</span>
+            <b>{{ v.nombre.split(' ')[0] }}</b><br>{{ v.comentario }}</div></div>
+        {% endfor %}
+        <p class="ayuda">Solo pueden valorar pacientes que han tenido cita a través de CitaCerca.</p>
+      </section>
+      {% endif %}
+    </div>
+
+    <aside>
+      <section class="tarjeta">
+        <h3>Horario</h3>
+        <table class="pequeno">
+          {% for n in range(7) %}<tr><td>{{ DIAS[n] }}</td><td>{{ horario.get(n, ['Cerrado'])|join(', ') }}</td></tr>{% endfor %}
+        </table>
+        {% if c.web %}<p class="pequeno"><a href="{{ c.web }}" target="_blank" rel="noopener nofollow">{{ c.web }}</a></p>{% endif %}
+      </section>
+
+      <section class="tarjeta" id="mensaje">
+        <h3>¿Prefieres que te llamen o tienes una duda?</h3>
+        {% if g.usuario and g.usuario.rol == 'paciente' %}
+          <form method="post" action="{{ url_for('dejar_mensaje', cid=c.id) }}">{{ csrf() }}
+            <label class="casilla"><input type="radio" name="tipo" value="llamada" checked> Que me llamen</label>
+            <label class="casilla"><input type="radio" name="tipo" value="consulta"> Solo tengo una consulta</label>
+            <label for="franja">Mejor franja para llamarte</label>
+            <select id="franja" name="franja"><option>Cualquier hora</option><option>Mañanas</option><option>Tardes</option><option>Mediodía</option></select>
+            <label for="texto">Mensaje</label>
+            <textarea id="texto" name="texto" required placeholder="Cuéntales brevemente qué necesitas"></textarea>
+            <p class="ayuda">La clínica verá tu nombre y teléfono ({{ g.usuario.telefono }}).</p>
+            <button style="width:100%">Enviar</button>
+          </form>
+        {% elif g.usuario %}
+          <p class="suave pequeno">Los mensajes se envían desde una cuenta de paciente.</p>
+        {% else %}
+          <p class="suave pequeno">Para enviar un mensaje necesitas una cuenta (es gratis y tardas un minuto).</p>
+          <a class="boton" href="{{ url_for('registro', siguiente=url_for('clinica', cid=c.id)) }}">Crear cuenta</a>
+          <a class="boton secundario" href="{{ url_for('entrar', siguiente=url_for('clinica', cid=c.id)) }}">Entrar</a>
+        {% endif %}
+      </section>
+    </aside>
+  </div>
+</div>
+{% endblock %}

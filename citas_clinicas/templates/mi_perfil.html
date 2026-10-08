@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block titulo %}Mi perfil{% endblock %}
+{% block contenido %}
+<div class="contenedor estrecho" style="padding:0">
+  <div class="tarjeta">
+    <h1>Mi perfil</h1>
+    <p class="suave">{{ g.usuario.email }}</p>
+    <form method="post">{{ csrf() }}
+      <label for="nombre">Nombre y apellidos</label>
+      <input id="nombre" name="nombre" type="text" required value="{{ g.usuario.nombre }}">
+      <label for="telefono">Teléfono</label>
+      <input id="telefono" name="telefono" type="tel" required value="{{ g.usuario.telefono }}">
+      <label for="codigo_postal">Código postal</label>
+      <input id="codigo_postal" name="codigo_postal" type="text" inputmode="numeric" maxlength="5" required value="{{ g.usuario.codigo_postal }}">
+      <button style="margin-top:16px">Guardar</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

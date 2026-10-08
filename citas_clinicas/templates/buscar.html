@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block titulo %}Buscar clínicas{% endblock %}
+{% block contenido %}
+<div class="dos" style="grid-template-columns: 280px 1fr">
+  <aside>
+    <form class="tarjeta filtros" action="{{ url_for('buscar') }}">
+      <h3>Filtrar</h3>
+      <label for="necesidad">¿Qué necesitas?</label>
+      <input id="necesidad" name="necesidad" type="text" value="{{ necesidad }}" placeholder="Ej.: dolor cervical">
+      <label for="tipo">Especialidad</label>
+      <select id="tipo" name="tipo">
+        <option value="">Cualquiera</option>
+        {% for clave, (nombre, icono) in TIPOS.items() %}
+          <option value="{{ clave }}" {% if clave == tipo %}selected{% endif %}>{{ icono }} {{ nombre }}</option>
+        {% endfor %}
+      </select>
+      <label for="cp">Código postal</label>
+      <input id="cp" name="cp" type="text" inputmode="numeric" maxlength="5" value="{{ cp }}">
+      <label for="franja">Franja</label>
+      <select id="franja" name="franja">
+        <option value="">Todo el día</option>
+        <option value="manana" {% if franja == 'manana' %}selected{% endif %}>Mañanas (antes de 14:00)</option>
+        <option value="tarde" {% if franja == 'tarde' %}selected{% endif %}>Tardes</option>
+      </select>
+      <label for="orden">Ordenar por</label>
+      <select id="orden" name="orden">
+        <option value="distancia">Cercanía</option>
+        <option value="pronto" {% if orden == 'pronto' %}selected{% endif %}>Cita más pronto</option>
+        <option value="valoracion" {% if orden == 'valoracion' %}selected{% endif %}>Mejor valoradas</option>
+      </select>
+      <label>Necesito que…</label>
+      {% for clave, texto in CARACTERISTICAS.items() %}
+        <label class="casilla"><input type="checkbox" name="req" value="{{ clave }}" {% if clave in requisitos %}checked{% endif %}> {{ texto }}</label>
+      {% endfor %}
+      <button style="width:100%;margin-top:12px">Aplicar</button>
+    </form>
+  </aside>
+
+  <section>
+    <h1>{% if tipo %}{{ TIPOS[tipo][1] }} {{ TIPOS[tipo][0] }}{% elif necesidad %}Clínicas para «{{ necesidad }}»{% else %}Todas las clínicas{% endif %}</h1>
+    {% if inferidos %}
+      <p class="suave">Por lo que nos cuentas, te pueden ayudar en:
+        {% for t in inferidos %}<a href="{{ url_for('buscar', tipo=t, necesidad=necesidad, cp=cp) }}">{{ TIPOS[t][0] }}</a>{% if not loop.last %}, {% endif %}{% endfor %}.
+      </p>
+    {% endif %}
+    {% if cp and not cp_ok %}<div class="aviso error">El código postal «{{ cp }}» no es válido; no podemos ordenar por cercanía.</div>{% endif %}
+    {% if not cp %}<div class="aviso">Indica tu código postal para ver primero las clínicas más cercanas.</div>{% endif %}
+    <p class="suave">{{ resultados|length }} resultado{{ '' if resultados|length == 1 else 's' }} · huecos de los próximos 7 días</p>
+
+    {% for r in resultados %}{% set c = r.clinica %}
+      {% set s = r.servicio_sugerido or (r.servicios[0] if r.servicios else None) %}
+      <article class="tarjeta resultado" style="--acento: {{ c.color }}">
+        <a href="{{ url_for('clinica', cid=c.id, servicio=s.id if s else None) }}">
+          {% if c.foto %}<img class="miniatura" src="{{ url_for('subida', nombre=c.foto) }}" alt="{{ c.nombre }}">
+          {% else %}<div class="miniatura">{{ TIPOS[c.tipo][1] }}</div>{% endif %}
+        </a>
+        <div>
+          <h2 style="margin-bottom:2px"><a href="{{ url_for('clinica', cid=c.id, servicio=s.id if s else None) }}" style="color:inherit;text-decoration:none">{{ c.nombre }}</a></h2>
+          <div class="suave pequeno">
+            {{ TIPOS[c.tipo][0] }} · {{ c.ciudad }} {{ c.codigo_postal }}
+            {% if r.distancia_texto %} · <b>{{ r.distancia_texto }}</b>{% endif %}
+            {% if r.valoracion[1] %} · <span class="estrellas">★</span> {{ '%.1f'|format(r.valoracion[0]) }} ({{ r.valoracion[1] }}){% endif %}
+            {% if r.precio_desde is not none %} · desde {{ '%.0f'|format(r.precio_desde) }} €{% endif %}
+          </div>
+          {% if c.eslogan %}<p style="margin:6px 0">{{ c.eslogan }}</p>{% endif %}
+          <ul class="etiquetas">
+            {% if r.servicio_sugerido %}<li class="etiqueta color">✔ {{ r.servicio_sugerido.nombre }}</li>{% endif %}
+            {% for k in r.caracteristicas %}<li class="etiqueta">{{ CARACTERISTICAS[k] }}</li>{% endfor %}
+          </ul>
+          {% if r.proximos and s %}
+            <div class="pequeno"><b>{{ r.total_huecos }} hueco{{ '' if r.total_huecos == 1 else 's' }} libres</b> para «{{ s.nombre }}» ({{ s.duracion }} min). Próximos:</div>
+            <div class="huecos">
+              {% for d, h in r.proximos %}
+                <a class="hueco" href="{{ url_for('reservar', cid=c.id, servicio=s.id, fecha=d.isoformat(), hora=h) }}">{{ d|fecha_corta }} · {{ h }}</a>
+              {% endfor %}
+              <a class="hueco" href="{{ url_for('clinica', cid=c.id, servicio=s.id) }}">Ver semana →</a>
+            </div>
+          {% else %}
+            <p class="pequeno suave">Sin huecos online esta semana.
+              {% if c.telefono %}<a href="tel:{{ c.telefono }}">Llama al {{ c.telefono }}</a> o <a href="{{ url_for('clinica', cid=c.id) }}#mensaje">deja un mensaje</a>.{% endif %}</p>
+          {% endif %}
+        </div>
+      </article>
+    {% else %}
+      <div class="tarjeta">
+        <h3>No hemos encontrado clínicas con esos criterios</h3>
+        <p class="suave">Prueba con otra especialidad, quita algún filtro o describe tu necesidad con otras palabras.</p>
+        <a class="boton secundario" href="{{ url_for('buscar', cp=cp) }}">Ver todas</a>
+      </div>
+    {% endfor %}
+  </section>
+</div>
+{% endblock %}

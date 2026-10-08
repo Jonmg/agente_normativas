@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block titulo %}CitaCerca{% endblock %} · CitaCerca</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='estilo.css') }}">
+</head>
+<body>
+<header class="barra">
+  <a class="marca" href="{{ url_for('inicio') }}">📍 Cita<b>Cerca</b></a>
+  <nav>
+    <a href="{{ url_for('buscar') }}">Buscar</a>
+    {% if g.usuario %}
+      {% if g.usuario.rol == 'clinica' %}
+        <a href="{{ url_for('panel') }}">Mi clínica{% if avisos %} <span class="globo">{{ avisos }}</span>{% endif %}</a>
+      {% else %}
+        <a href="{{ url_for('mi_panel') }}">Mis citas{% if avisos %} <span class="globo">{{ avisos }}</span>{% endif %}</a>
+        <a href="{{ url_for('mi_perfil') }}">Perfil</a>
+      {% endif %}
+      <form method="post" action="{{ url_for('salir') }}" class="enlinea">{{ csrf() }}
+        <button class="enlace">Salir</button></form>
+    {% else %}
+      <a href="{{ url_for('entrar') }}">Entrar</a>
+      <a class="boton pequeno" href="{{ url_for('registro') }}">Crear cuenta</a>
+    {% endif %}
+  </nav>
+</header>
+<main class="{% block clase_main %}contenedor{% endblock %}">
+  {% with mensajes = get_flashed_messages(with_categories=true) %}
+    {% if mensajes %}<div class="avisos">
+      {% for cat, m in mensajes %}<div class="aviso {{ cat }}">{{ m }}</div>{% endfor %}
+    </div>{% endif %}
+  {% endwith %}
+  {% block contenido %}{% endblock %}
+</main>
+<footer class="pie">
+  CitaCerca · Las clínicas confirman sus propias citas. En caso de urgencia vital llama al <b>112</b>.
+  {% if not g.usuario %} · <a href="{{ url_for('registro_clinica') }}">¿Tienes una clínica? Publícala gratis</a>{% endif %}
+</footer>
+</body>
+</html>

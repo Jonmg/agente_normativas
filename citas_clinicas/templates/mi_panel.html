@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block titulo %}Mis citas{% endblock %}
+{% block contenido %}
+<div class="fila" style="justify-content:space-between;align-items:center">
+  <h1 style="flex:1 1 auto">Hola, {{ g.usuario.nombre.split(' ')[0] }}</h1>
+  <a class="boton" style="flex:0 0 auto" href="{{ url_for('buscar') }}">+ Pedir otra cita</a>
+</div>
+
+<div class="dos">
+  <div>
+    <section class="tarjeta">
+      <h2>Próximas citas</h2>
+      {% for c in proximas %}
+        <div class="cita {% if c.id in novedades %}nuevo{% endif %}">
+          <div>
+            <b>{{ c.fecha|fecha_bonita }} · {{ c.hora }}</b> <span class="estado {{ c.estado }}">{{ ESTADOS_CITA[c.estado] }}</span><br>
+            <a href="{{ url_for('clinica', cid=c.clinica_id) }}">{{ c.clinica }}</a> · {{ c.servicio or 'Servicio' }} ({{ c.duracion }} min)
+            {% if c.respuesta_clinica %}<br><span class="pequeno">💬 <i>{{ c.respuesta_clinica }}</i></span>{% endif %}
+          </div>
+          <div class="fila" style="flex:0 0 auto;align-items:center">
+            {% if c.tel_clinica %}<a class="boton secundario pequeno" href="tel:{{ c.tel_clinica }}">📞 Llamar</a>{% endif %}
+            <details><summary class="pequeno">Cancelar</summary>
+              <form method="post" action="{{ url_for('cancelar_cita', id=c.id) }}">{{ csrf() }}
+                <input type="text" name="motivo" placeholder="Motivo (opcional)">
+                <button class="peligro pequeno" style="margin-top:6px">Confirmar cancelación</button>
+              </form>
+            </details>
+          </div>
+        </div>
+      {% else %}
+        <p class="suave">No tienes citas próximas. <a href="{{ url_for('buscar') }}">Busca un hueco</a>.</p>
+      {% endfor %}
+    </section>
+
+    <section class="tarjeta">
+      <h2>Historial</h2>
+      {% for c in historial %}
+        <div class="cita {% if c.id in novedades %}nuevo{% endif %}">
+          <div>
+            {{ c.fecha|fecha_bonita }} · {{ c.hora }} <span class="estado {{ c.estado if c.estado != 'confirmada' else 'completada' }}">{{ ESTADOS_CITA[c.estado] if c.estado != 'confirmada' else 'Pasada' }}</span><br>
+            <a href="{{ url_for('clinica', cid=c.clinica_id) }}">{{ c.clinica }}</a> · {{ c.servicio or 'Servicio' }}
+            {% if c.respuesta_clinica %}<br><span class="pequeno">💬 <i>{{ c.respuesta_clinica }}</i></span>{% endif %}
+            {% if c.puntuacion %}<br><span class="estrellas">{{ '★' * c.puntuacion }}</span> <span class="pequeno suave">Tu valoración</span>{% endif %}
+          </div>
+          <div style="flex:0 0 auto">
+            {% if c.servicio_id %}<a class="boton secundario pequeno" href="{{ url_for('clinica', cid=c.clinica_id, servicio=c.servicio_id) }}#reservar">Repetir</a>{% endif %}
+            {% if not c.puntuacion and puede_valorarse(c) %}
+              <details><summary class="pequeno">Valorar</summary>
+                <form method="post" action="{{ url_for('valorar_cita', id=c.id) }}">{{ csrf() }}
+                  <div class="puntos">
+                    {% for n in range(5, 0, -1) %}<input type="radio" id="p{{ c.id }}-{{ n }}" name="puntuacion" value="{{ n }}" required><label for="p{{ c.id }}-{{ n }}">★</label>{% endfor %}
+                  </div>
+                  <textarea name="comentario" placeholder="¿Qué tal fue? (opcional)" style="min-height:60px"></textarea>
+                  <button class="pequeno" style="margin-top:6px">Enviar</button>
+                </form>
+              </details>
+            {% endif %}
+          </div>
+        </div>
+      {% else %}
+        <p class="suave">Aún no hay citas pasadas.</p>
+      {% endfor %}
+    </section>
+  </div>
+
+  <aside>
+    <section class="tarjeta">
+      <h2>Mensajes</h2>
+      {% for m in mensajes %}
+        <div class="cita {% if m.id in mensajes_nuevos %}nuevo{% endif %}" style="display:block">
+          <b>{{ m.clinica }}</b> <span class="estado {{ 'confirmada' if m.estado == 'respondido' else 'pendiente' }}">{{ 'Respondido' if m.estado == 'respondido' else ('Esperando llamada' if m.tipo == 'llamada' else 'Enviado') }}</span>
+          <p class="pequeno" style="margin:4px 0">Tú: {{ m.texto }}</p>
+          {% if m.respuesta %}<p class="pequeno" style="margin:4px 0">💬 <i>{{ m.respuesta }}</i></p>{% endif %}
+        </div>
+      {% else %}
+        <p class="suave pequeno">Desde la ficha de cada clínica puedes pedir que te llamen o hacer una consulta.</p>
+      {% endfor %}
+    </section>
+  </aside>
+</div>
+{% endblock %}

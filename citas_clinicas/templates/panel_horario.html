@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block titulo %}Horario{% endblock %}
+{% block contenido %}
+{% include "_subnav_clinica.html" %}
+<div class="dos">
+  <form class="tarjeta" method="post">{{ csrf() }}
+    <h2>Horario semanal</h2>
+    <p class="suave pequeno">Hasta dos tramos por día (mañana y tarde). Deja vacío para cerrado. Los huecos se generan solos a partir de aquí.</p>
+    <table class="horario">
+      <tr><th>Día</th><th colspan="2">Tramo 1</th><th colspan="2">Tramo 2</th></tr>
+      {% for d in range(7) %}{% set tramos = horario.get(d, []) %}
+        <tr><td>{{ DIAS[d] }}</td>
+          {% for n in [1, 2] %}{% set t = tramos[n-1] if tramos|length >= n else None %}
+            <td><input type="time" name="d{{ d }}_ini{{ n }}" value="{{ t.inicio if t else '' }}"></td>
+            <td><input type="time" name="d{{ d }}_fin{{ n }}" value="{{ t.fin if t else '' }}"></td>
+          {% endfor %}
+        </tr>
+      {% endfor %}
+    </table>
+    <button style="margin-top:12px">Guardar horario</button>
+  </form>
+
+  <aside>
+    <form class="tarjeta" method="post" action="{{ url_for('nuevo_bloqueo') }}">{{ csrf() }}
+      <h2>Bloquear días u horas</h2>
+      <p class="suave pequeno">Vacaciones, festivos, formación o una cita que has dado por teléfono.</p>
+      <div class="fila">
+        <div><label for="desde">Desde</label><input id="desde" name="desde" type="date" min="{{ hoy }}" required></div>
+        <div><label for="hasta">Hasta</label><input id="hasta" name="hasta" type="date" min="{{ hoy }}"></div>
+      </div>
+      <div class="fila">
+        <div><label for="inicio">De</label><input id="inicio" name="inicio" type="time"></div>
+        <div><label for="fin">A</label><input id="fin" name="fin" type="time"></div>
+      </div>
+      <p class="ayuda">Sin horas se bloquea el día completo.</p>
+      <label for="motivo">Motivo (interno)</label>
+      <input id="motivo" name="motivo" type="text" placeholder="Ej.: Vacaciones">
+      <button style="margin-top:12px;width:100%">Bloquear</button>
+    </form>
+    <section class="tarjeta">
+      <h3>Bloqueos próximos</h3>
+      {% for b in bloqueos %}
+        <div class="cita"><div>{{ b.fecha|fecha_bonita }} · {{ (b.inicio ~ '–' ~ b.fin) if b.inicio else 'Todo el día' }}
+          {% if b.motivo %}<br><span class="suave pequeno">{{ b.motivo }}</span>{% endif %}</div>
+          <form method="post" action="{{ url_for('borrar_bloqueo', id=b.id) }}">{{ csrf() }}<button class="secundario pequeno">Quitar</button></form></div>
+      {% else %}<p class="suave pequeno">Ninguno.</p>{% endfor %}
+    </section>
+  </aside>
+</div>
+{% endblock %}
