@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block titulo %}Administración{% endblock %}
+{% block contenido %}
+<div class="fila" style="justify-content:space-between;align-items:center">
+  <h1 style="flex:1 1 auto">Administración · {{ titulo_mes }}</h1>
+  <form style="flex:0 0 auto" class="fila">
+    <select name="mes" onchange="this.form.submit()" aria-label="Mes">
+      {% for valor, texto in meses %}<option value="{{ valor }}" {% if valor == mes %}selected{% endif %}>{{ texto }}</option>{% endfor %}
+    </select>
+  </form>
+</div>
+
+<div class="cifras">
+  <div class="cifra"><b>{{ totales.importe|euros }}</b>a facturar (estimado)</div>
+  <div class="cifra"><b>{{ totales.facturables }}</b>pacientes nuevos facturables
+    {% if totales.nuevos != totales.facturables %}<span class="pequeno suave">· {{ totales.nuevos - totales.facturables }} ya eran pacientes</span>{% endif %}</div>
+  <div class="cifra"><b>{{ totales.clinicas }}</b>clínicas activas <span class="pequeno suave">· {{ totales.clinicas_nuevas }} altas este mes</span></div>
+  <div class="cifra"><b>{{ totales.pacientes }}</b>pacientes registrados <span class="pequeno suave">· {{ totales.pacientes_nuevos }} este mes</span></div>
+</div>
+
+<section class="tarjeta">
+  <h2>Embudo de la plataforma</h2>
+  <div class="embudo">
+    <div><b>{{ totales.vistas }}</b>visitas a fichas</div>
+    <div><b>{{ totales.llamadas }}</b>clics en «Llamar»</div>
+    <div><b>{{ totales.mensajes }}</b>mensajes</div>
+    <div><b>{{ totales.solicitudes }}</b>solicitudes de cita</div>
+    <div><b>{{ totales.nuevos }}</b>pacientes nuevos</div>
+  </div>
+  <p class="ayuda">Las llamadas directas no se pueden atribuir con certeza: aquí solo cuenta quien pulsa «Llamar» en la ficha.
+    Se cobra por paciente nuevo confirmado (primera cita con esa clínica), a {{ tarifa_general|euros }} salvo tarifa propia.</p>
+</section>
+
+<section class="tarjeta">
+  <div class="fila" style="justify-content:space-between;align-items:center">
+    <h2 style="flex:1 1 auto;margin:0">Clínicas</h2>
+    <a class="boton secundario pequeno" style="flex:0 0 auto" href="{{ url_for('admin_csv', mes=mes) }}">⬇ Descargar captaciones (CSV)</a>
+  </div>
+  <div class="tabla-scroll">
+  <table>
+    <tr><th>Clínica</th><th class="num">Visitas</th><th class="num">Llamar</th><th class="num">Mensajes</th>
+      <th class="num">Solicitudes</th><th class="num">Nuevos</th><th class="num">Tarifa</th><th class="num">Importe</th><th></th></tr>
+    {% for f in filas %}{% set c = f.clinica %}
+      <tr class="{% if not c.activa %}inactiva{% endif %}">
+        <td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:{{ c.color }}"></span>
+          <b>{{ c.nombre }}</b>{% if not c.activa %} <span class="etiqueta">oculta</span>{% endif %}<br>
+          <span class="pequeno suave">{{ TIPOS[c.tipo][0] }} · {{ c.ciudad }} {{ c.codigo_postal }}{% if c.lat is none %} · sin mapa{% endif %}</span></td>
+        <td class="num">{{ f.vistas }}</td><td class="num">{{ f.llamadas }}</td><td class="num">{{ f.mensajes }}</td>
+        <td class="num">{{ f.solicitudes }}</td>
+        <td class="num"><b>{{ f.facturables }}</b>{% if f.nuevos != f.facturables %}<span class="suave"> / {{ f.nuevos }}</span>{% endif %}</td>
+        <td class="num">{{ f.tarifa|euros }}{% if c.tope_mensual is not none %}<br><span class="pequeno suave">tope {{ c.tope_mensual|euros }}</span>{% endif %}</td>
+        <td class="num"><b>{{ f.importe|euros }}</b></td>
+        <td><a class="boton secundario pequeno" href="{{ url_for('admin_clinica', cid=c.id, mes=mes) }}">Detalle</a></td>
+      </tr>
+    {% else %}
+      <tr><td colspan="9" class="suave">Aún no hay clínicas.</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+</section>
+
+{% if sin_actividad %}
+<section class="tarjeta">
+  <h2>Clínicas a las que llamar</h2>
+  <p class="suave pequeno">Activas pero sin visitas ni solicitudes este mes: revisar ficha, huecos o especialidad.</p>
+  <ul>{% for f in sin_actividad %}<li><a href="{{ url_for('admin_clinica', cid=f.clinica.id, mes=mes) }}">{{ f.clinica.nombre }}</a> · {{ f.clinica.telefono }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+{% endblock %}

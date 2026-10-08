@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block titulo %}Ficha de la clínica{% endblock %}
+{% block cabeza %}{% include "_leaflet.html" %}{% endblock %}
 {% block contenido %}
 {% include "_subnav_clinica.html" %}
 <form method="post" enctype="multipart/form-data">{{ csrf() }}
@@ -27,6 +28,21 @@
         <div><label for="telefono">Teléfono</label><input id="telefono" name="telefono" type="tel" value="{{ c.telefono }}"></div>
         <div><label for="web">Web</label><input id="web" name="web" type="url" value="{{ c.web }}" placeholder="https://"></div>
       </div>
+      <div id="mapa"></div>
+      <label>Ubicación en el mapa</label>
+      <p class="ayuda" style="margin-top:0">Así los pacientes ven dónde estás y la distancia real. Pulsa el botón o haz clic en el mapa; puedes arrastrar la chincheta.</p>
+      <input type="hidden" name="lat" id="lat" value="{{ c.lat if c.lat is not none else '' }}">
+      <input type="hidden" name="lon" id="lon" value="{{ c.lon if c.lon is not none else '' }}">
+      <button type="button" class="secundario pequeno" id="buscar-direccion">📍 Situar por la dirección</button>
+      <span class="ayuda" id="aviso-mapa">{% if c.lat is none %}Tu clínica aún no está en el mapa.{% endif %}</span>
+      <div id="mapa-editor" class="mapa-editor"></div>
+      <script>
+        CitaMapa.editor("mapa-editor", document.getElementById("lat"), document.getElementById("lon"),
+          document.getElementById("buscar-direccion"),
+          () => ["direccion", "codigo_postal", "ciudad"].map((id) => document.getElementById(id).value).join(", "),
+          document.getElementById("aviso-mapa"));
+      </script>
+
       <label>Servicios extra</label>
       <div class="rejilla" style="gap:4px;grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">
         {% for k, t in CARACTERISTICAS.items() %}

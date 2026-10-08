@@ -139,3 +139,16 @@ details summary { cursor: pointer; color: var(--primario); font-weight: 600; }
 
 .banda-demo { background: #fffaeb; border-bottom: 1px solid #fedf89; color: #93370d; text-align: center;
               font-size: .85rem; padding: 6px 16px; }
+
+.rejilla-buscar { grid-template-columns: 280px 1fr; }
+@media (max-width: 800px) { .rejilla-buscar { grid-template-columns: 1fr; } .filtros { position: static; } }
+.mapa { height: 340px; overflow: hidden; z-index: 0; }
+.mapa-pequeno { height: 220px; border-radius: 10px; margin-top: 10px; z-index: 0; }
+.mapa-editor { height: 300px; border-radius: 10px; margin-top: 8px; z-index: 0; }
+.embudo { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; }
+.embudo div { background: #f8fafc; border: 1px solid var(--borde); border-radius: 10px; padding: 10px; }
+.embudo b { display: block; font-size: 1.4rem; }
+.tabla-scroll { overflow-x: auto; }
+.tabla-scroll table { min-width: 860px; font-size: .9rem; }
+td.num, th.num { text-align: right; white-space: nowrap; }
+.inactiva { opacity: .55; }

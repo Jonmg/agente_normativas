@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block titulo %}CitaCerca{% endblock %} · CitaCerca</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='estilo.css') }}">
+  {% block cabeza %}{% endblock %}
 </head>
 <body>
 <header class="barra">
@@ -12,7 +13,9 @@
   <nav>
     <a href="{{ url_for('buscar') }}">Buscar</a>
     {% if g.usuario %}
-      {% if g.usuario.rol == 'clinica' %}
+      {% if g.usuario.rol == 'admin' %}
+        <a href="{{ url_for('admin') }}">Administración</a>
+      {% elif g.usuario.rol == 'clinica' %}
         <a href="{{ url_for('panel') }}">Mi clínica{% if avisos %} <span class="globo">{{ avisos }}</span>{% endif %}</a>
       {% else %}
         <a href="{{ url_for('mi_panel') }}">Mis citas{% if avisos %} <span class="globo">{{ avisos }}</span>{% endif %}</a>

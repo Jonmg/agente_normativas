@@ -46,6 +46,7 @@ real haría falta un disco persistente o una base de datos gestionada.
 | 🦷 Sonrisa Norte (Madrid 28046) | dental@demo.es | Revisión gratis, urgencias, mensaje de llamada pendiente |
 | 💪 FisioActiva Getafe (28901) | fisio@demo.es | Abre a las 8:00, suelo pélvico, punción seca |
 | 👤 Paciente Ana López (28010) | paciente@demo.es | Citas confirmadas, pendientes y una pasada para valorar |
+| 🛠️ Administración | admin@demo.es | Panel de captación y facturación de toda la plataforma |
 
 O regístrate tú como paciente en «Crear cuenta», o como clínica en «Registrar mi clínica».
 
@@ -72,13 +73,37 @@ O regístrate tú como paciente en «Crear cuenta», o como clínica en «Regist
 - Mensajes y peticiones de llamada; agenda de 14 días; marcar citas como realizadas.
 - Solo pueden valorar pacientes con una cita real.
 
+**Mapa**
+- Búsqueda con mapa de las clínicas (chincheta del color de cada una, próximo hueco al tocarla).
+- «📍 Usar mi ubicación»: distancia real en metros/km y orden por cercanía de verdad.
+  Sin ubicación se sigue aproximando por código postal.
+- La clínica se sitúa en su «Ficha»: botón «Situar por la dirección» o clic en el mapa.
+- OpenStreetMap + Leaflet: sin claves ni coste. Si el mapa no carga, la página sigue funcionando.
+
+**Administración y modelo de cobro** (`/admin`)
+- Se cobra por **paciente nuevo**: la primera cita confirmada o realizada de un paciente
+  con una clínica. Repetir con la misma clínica no cuenta; cancelar sí lo descuenta.
+- Al confirmar, la clínica puede marcar «Ya era paciente mío» y esa cita no se factura.
+- Tarifa general con `CITAS_TARIFA` (8 € por defecto); por clínica se puede fijar tarifa
+  propia (0 = piloto gratis) y un tope mensual.
+- Embudo por mes: visitas a la ficha → clics en «Llamar» / «Cómo llegar» → mensajes →
+  solicitudes → pacientes nuevos. La clínica ve su propio embudo en su panel: es el
+  argumento de venta («este mes te hemos traído X»).
+- CSV mensual de captaciones (justificante para facturar) y lista de clínicas sin actividad.
+- Cuenta de administración en producción: variables `CITAS_ADMIN_EMAIL` y `CITAS_ADMIN_CLAVE`
+  (se crea o actualiza al arrancar).
+
+Las llamadas directas no se pueden atribuir con certeza: solo se cuenta quien pulsa
+«Llamar» en la ficha. Antes de cobrar por paciente en profesiones sanitarias, conviene
+confirmar con un abogado que es compatible con sus códigos deontológicos.
+
 ## Cómo está montado
 
 ```
 app.py           Flask + SQLite (stdlib). Rutas, búsqueda y cálculo de huecos.
 datos_demo.py    siembra las 4 clínicas, pacientes, citas y valoraciones.
 templates/       plantillas Jinja.
-static/          estilo.css (sin frameworks).
+static/          estilo.css y mapa.js (sin frameworks; Leaflet desde CDN para el mapa).
 pruebas.py       batería offline (unittest).
 datos/           base de datos, fotos subidas y clave de sesión. No versionado.
 ```

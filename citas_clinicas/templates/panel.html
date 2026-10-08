@@ -15,6 +15,20 @@
   <div class="cifra"><b>{{ libres }}</b>huecos libres esta semana</div>
 </div>
 
+<section class="tarjeta">
+  <h2>Lo que te ha traído CitaCerca en {{ mes }}</h2>
+  <div class="embudo">
+    <div><b>{{ rendimiento.vistas }}</b>visitas a tu ficha</div>
+    <div><b>{{ rendimiento.llamadas }}</b>pulsaron «Llamar»</div>
+    <div><b>{{ rendimiento.mapa }}</b>pulsaron «Cómo llegar»</div>
+    <div><b>{{ rendimiento.mensajes }}</b>mensajes</div>
+    <div><b>{{ rendimiento.solicitudes }}</b>solicitudes de cita</div>
+    <div><b>{{ rendimiento.nuevos }}</b>pacientes nuevos</div>
+  </div>
+  <p class="ayuda">Paciente nuevo: su primera cita confirmada contigo a través de CitaCerca.
+    Si ya era paciente tuyo, márcalo al confirmar y no cuenta.</p>
+</section>
+
 <div class="dos">
   <div>
     <section class="tarjeta">
@@ -29,6 +43,7 @@
           </div>
           <form method="post" style="flex:1 1 220px">{{ csrf() }}
             <input type="text" name="respuesta" placeholder="Mensaje para el paciente (opcional)">
+            <label class="casilla pequeno" style="margin:6px 0 0"><input type="checkbox" name="ya_paciente" value="1"> Ya era paciente mío</label>
             <div class="fila" style="margin-top:6px">
               <button class="pequeno" formaction="{{ url_for('accion_cita', id=c.id, accion='confirmar') }}">Confirmar</button>
               <button class="peligro pequeno" formaction="{{ url_for('accion_cita', id=c.id, accion='rechazar') }}">No puedo</button>

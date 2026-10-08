@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block titulo %}{{ c.nombre }}{% endblock %}
+{% block cabeza %}{% include "_leaflet.html" %}{% endblock %}
 {% block clase_main %}{% endblock %}
 {% block contenido %}
 <section class="portada" style="--acento: {{ c.color }}">
@@ -16,9 +17,9 @@
       </div>
       <div class="acciones">
         <a class="boton" href="#reservar">📅 Pedir cita</a>
-        {% if c.telefono %}<a class="boton" href="tel:{{ c.telefono }}">📞 Llamar · {{ c.telefono }}</a>{% endif %}
+        {% if c.telefono %}<a class="boton" href="tel:{{ c.telefono }}" data-evento="llamar" data-csrf="{{ token_csrf() }}" data-url="{{ url_for('evento', cid=c.id) }}">📞 Llamar · {{ c.telefono }}</a>{% endif %}
         <a class="boton" href="#mensaje">✉️ Dejar mensaje</a>
-        <a class="boton" target="_blank" rel="noopener"
+        <a class="boton" target="_blank" rel="noopener" data-evento="mapa" data-csrf="{{ token_csrf() }}" data-url="{{ url_for('evento', cid=c.id) }}"
            href="https://www.google.com/maps/search/?api=1&query={{ (c.direccion ~ ' ' ~ c.codigo_postal ~ ' ' ~ c.ciudad)|urlencode }}">🗺️ Cómo llegar</a>
       </div>
       {% if not c.activa %}<p class="aviso error" style="margin-top:12px">Ficha oculta: los pacientes no la ven. Actívala en «Ficha».</p>{% endif %}
@@ -98,8 +99,23 @@
         <table class="pequeno">
           {% for n in range(7) %}<tr><td>{{ DIAS[n] }}</td><td>{{ horario.get(n, ['Cerrado'])|join(', ') }}</td></tr>{% endfor %}
         </table>
-        {% if c.web %}<p class="pequeno"><a href="{{ c.web }}" target="_blank" rel="noopener nofollow">{{ c.web }}</a></p>{% endif %}
+        {% if c.web %}<p class="pequeno"><a href="{{ c.web }}" target="_blank" rel="noopener nofollow" data-evento="web" data-csrf="{{ token_csrf() }}" data-url="{{ url_for('evento', cid=c.id) }}">{{ c.web }}</a></p>{% endif %}
       </section>
+
+      {% if c.lat is not none %}
+      <section class="tarjeta">
+        <h3>Dónde está</h3>
+        <p class="pequeno suave" style="margin:0">{{ c.direccion }}{% if c.direccion %}, {% endif %}{{ c.codigo_postal }} {{ c.ciudad }}</p>
+        <div id="mapa-clinica" class="mapa-pequeno"></div>
+        <script>
+          (() => {
+            if (!CitaMapa.disponible("mapa-clinica")) return;
+            const m = CitaMapa.crear("mapa-clinica", [{{ c.lat }}, {{ c.lon }}], 15);
+            CitaMapa.chincheta(m, {{ c.lat }}, {{ c.lon }}, {{ c.color|tojson }});
+          })();
+        </script>
+      </section>
+      {% endif %}
 
       <section class="tarjeta" id="mensaje">
         <h3>¿Prefieres que te llamen o tienes una duda?</h3>

@@ -20,3 +20,7 @@ services:
         value: "1"
       - key: CITAS_SECRETO
         generateValue: true
+      - key: CITAS_TARIFA
+        value: "8"
+      # Para una cuenta de administración propia (además de admin@demo.es en la demo),
+      # añade en el panel de Render CITAS_ADMIN_EMAIL y CITAS_ADMIN_CLAVE.

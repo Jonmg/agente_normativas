@@ -244,6 +244,151 @@ class ModoDemo(unittest.TestCase):
             db.close()
 
 
+class Captacion(Base):
+    OCTUBRE = (date(2026, 10, 1), date(2026, 11, 1))
+
+    def por_clinica(self):
+        db = self.db()
+        return {c["nombre"]: modulo.resumen_clinica(db, c, *self.OCTUBRE)
+                for c in db.execute("SELECT * FROM clinicas")}
+
+    def test_solo_primera_cita_por_paciente_y_clinica(self):
+        r = self.por_clinica()
+        # Dental: Ana y Lucía son nuevas. Podología: Pablo y Marta ya fueron en septiembre.
+        self.assertEqual(r["Clínica Dental Sonrisa Norte"]["nuevos"], 2)
+        self.assertEqual(r["Podología Pasos"]["nuevos"], 0)
+        self.assertEqual(r["Manos en Calma"]["nuevos"], 2)
+        self.assertEqual(r["FisioActiva Getafe"]["nuevos"], 1)
+        self.assertEqual(sum(x["importe"] for x in r.values()), 5 * modulo.TARIFA_POR_DEFECTO)
+
+    def test_ya_era_paciente_no_se_factura(self):
+        self.entrar("dental@demo.es")
+        db = self.db()
+        cita = db.execute("SELECT id FROM citas WHERE clinica_id = 3 AND estado = 'pendiente'").fetchone()
+        self.post(f"/panel/cita/{cita['id']}/confirmar", ya_paciente="1")
+        r = self.por_clinica()["Clínica Dental Sonrisa Norte"]
+        self.assertEqual((r["nuevos"], r["facturables"]), (3, 2))
+
+    def test_cancelada_no_cuenta_y_libera_la_siguiente(self):
+        db = self.db()
+        db.execute("UPDATE citas SET estado = 'cancelada' WHERE clinica_id = 3 AND estado = 'confirmada' "
+                   "AND fecha = '2026-10-07'")
+        db.commit()
+        self.assertEqual(self.por_clinica()["Clínica Dental Sonrisa Norte"]["nuevos"], 1)
+
+    def test_tarifa_propia_y_tope(self):
+        self.entrar("admin@demo.es")
+        self.post("/admin/clinica/3", tarifa="10", tope_mensual="15", activa="1")
+        r = self.por_clinica()["Clínica Dental Sonrisa Norte"]
+        self.assertEqual((r["tarifa"], r["importe"]), (10, 15))
+
+
+class Administracion(Base):
+    def test_solo_admin(self):
+        self.entrar("paciente@demo.es")
+        self.assertEqual(self.cli.get("/admin").status_code, 302)
+        self.post("/salir")
+        self.entrar("dental@demo.es")
+        self.assertEqual(self.cli.get("/admin/captaciones.csv").status_code, 302)
+
+    def test_panel_y_csv(self):
+        r = self.entrar("admin@demo.es")
+        self.assertIn("Administración · octubre 2026", r.get_data(as_text=True))  # entra directo al panel
+        html = self.cli.get("/admin?mes=2026-10").get_data(as_text=True)
+        self.assertIn("Sonrisa Norte", html)
+        self.assertIn("40,00 €", html)
+        self.assertEqual(self.cli.get("/admin/clinica/3?mes=2026-10").status_code, 200)
+        csv = self.cli.get("/admin/captaciones.csv?mes=2026-10").get_data(as_text=True)
+        self.assertIn("clinica;fecha;hora;paciente", csv)
+        self.assertIn("Lucía Gómez", csv)
+        self.assertEqual(csv.count("\n"), 6)  # cabecera + 5 captaciones
+
+    def test_admin_por_entorno(self):
+        ruta = self.app.config["BASE_DATOS"]
+        modulo.asegurar_admin(ruta, "yo@ejemplo.es", "clave-larga")
+        self.assertIn("Administración", self.entrar_con("yo@ejemplo.es", "clave-larga"))
+
+    def entrar_con(self, email, clave):
+        return self.post("/entrar", email=email, clave=clave).get_data(as_text=True)
+
+
+class Mapa(Base):
+    def test_distancia_real_con_ubicacion(self):
+        db = self.db()
+        res, _ = modulo.buscar_clinicas(db, cp="28010", lat=40.3100, lon=-3.7300)  # en Getafe
+        self.assertEqual(res[0]["clinica"]["nombre"], "FisioActiva Getafe")
+        self.assertIn("m", res[0]["distancia_texto"])
+        self.assertIn("km", res[-1]["distancia_texto"])
+
+    def test_clinica_sin_chincheta_va_detras(self):
+        db = self.db()
+        db.execute("UPDATE clinicas SET lat = NULL, lon = NULL WHERE nombre = 'Podología Pasos'")
+        db.commit()
+        res, _ = modulo.buscar_clinicas(db, cp="28010", lat=40.4316, lon=-3.7022)
+        self.assertEqual(res[-1]["clinica"]["nombre"], "Podología Pasos")
+
+    def test_busqueda_pinta_mapa(self):
+        html = self.cli.get("/buscar?lat=40.42&lon=-3.70").get_data(as_text=True)
+        self.assertIn("CitaMapa.resultados", html)
+        self.assertIn("Usando tu ubicación", html)
+        self.assertIn('"lat": 40.4639', html)
+
+    def test_guardar_ubicacion(self):
+        self.entrar("fisio@demo.es")
+        self.post("/panel/perfil", nombre="FisioActiva Getafe", tipo="fisioterapia", codigo_postal="28901",
+                  activa="1", duracion_hueco="15", lat="40.3", lon="-3.73")
+        fila = self.db().execute("SELECT lat, lon FROM clinicas WHERE id = 4").fetchone()
+        self.assertEqual(tuple(fila), (40.3, -3.73))
+        # Coordenadas absurdas no se guardan: se conservan las anteriores.
+        self.post("/panel/perfil", nombre="FisioActiva Getafe", tipo="fisioterapia", codigo_postal="28901",
+                  activa="1", duracion_hueco="15", lat="999", lon="-3.73")
+        fila = self.db().execute("SELECT lat FROM clinicas WHERE id = 4").fetchone()
+        self.assertEqual(fila[0], 40.3)
+
+
+class Eventos(Base):
+    def contar(self, tipo):
+        return self.db().execute("SELECT COUNT(*) FROM eventos WHERE clinica_id = 1 AND tipo = ?",
+                                 (tipo,)).fetchone()[0]
+
+    def test_vista_y_clic(self):
+        vistas, llamadas = self.contar("vista"), self.contar("llamar")
+        self.cli.get("/clinica/1")
+        self.assertEqual(self.contar("vista"), vistas + 1)
+        self.cli.post("/clinica/1/evento", data={"tipo": "llamar", "_csrf": self.csrf()})
+        self.assertEqual(self.contar("llamar"), llamadas + 1)
+        self.cli.post("/clinica/1/evento", data={"tipo": "inventado", "_csrf": self.csrf()})
+        self.assertEqual(self.db().execute("SELECT COUNT(*) FROM eventos WHERE tipo = 'inventado'").fetchone()[0], 0)
+
+    def test_la_propia_clinica_no_cuenta(self):
+        self.entrar("podologia@demo.es")
+        vistas = self.contar("vista")
+        self.cli.get("/clinica/1")
+        self.assertEqual(self.contar("vista"), vistas)
+
+
+class Migracion(unittest.TestCase):
+    def test_base_antigua(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = modulo.conectar(f"{tmp}/v.db")
+            db.executescript("""
+                CREATE TABLE usuarios (id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, clave TEXT NOT NULL,
+                    rol TEXT NOT NULL CHECK (rol IN ('paciente', 'clinica')), nombre TEXT NOT NULL,
+                    telefono TEXT DEFAULT '', codigo_postal TEXT DEFAULT '', creado TEXT NOT NULL);
+                INSERT INTO usuarios VALUES (1, 'a@b.es', 'x', 'clinica', 'A', '', '28010', '2026');
+                CREATE TABLE clinicas (id INTEGER PRIMARY KEY, usuario_id INTEGER NOT NULL UNIQUE REFERENCES usuarios(id),
+                    nombre TEXT NOT NULL, tipo TEXT NOT NULL, codigo_postal TEXT NOT NULL);
+                INSERT INTO clinicas VALUES (1, 1, 'Vieja', 'podologia', '28010');
+            """)
+            db.close()
+            db = modulo.iniciar_bd(f"{tmp}/v.db")
+            db.execute("INSERT INTO usuarios (email, clave, rol, nombre, creado) VALUES ('ad@b.es', 'x', 'admin', 'Ad', '')")
+            fila = db.execute("SELECT nombre, lat, tarifa FROM clinicas").fetchone()
+            self.assertEqual(tuple(fila), ("Vieja", None, None))
+            self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+            db.close()
+
+
 class Paginas(Base):
     def test_todas_cargan(self):
         for url in ("/", "/buscar", "/clinica/1", "/clinica/2?servicio=6&semana=1", "/registro",
@@ -255,6 +400,10 @@ class Paginas(Base):
         self.post("/salir")
         self.entrar("dental@demo.es")
         for url in ("/panel", "/panel/perfil", "/panel/servicios", "/panel/horario"):
+            self.assertEqual(self.cli.get(url).status_code, 200, url)
+        self.post("/salir")
+        self.entrar("admin@demo.es")
+        for url in ("/admin", "/admin?mes=2026-09", "/admin?mes=basura", "/admin/clinica/1", "/buscar"):
             self.assertEqual(self.cli.get(url).status_code, 200, url)
 
     def test_redireccion_abierta(self):

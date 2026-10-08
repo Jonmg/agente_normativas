@@ -24,6 +24,7 @@ CLINICAS = [
                        "tratamiento de uña encarnada sin dolor y plantillas a medida fabricadas en "
                        "nuestro propio taller. Atendemos a deportistas, personas mayores y pie diabético.",
         "direccion": "Calle de Fuencarral 112", "ciudad": "Madrid", "cp": "28010", "tel": "910000101",
+        "lat": 40.4316, "lon": -3.7022,
         "web": "", "caract": "accesible,tarjeta,seguros", "hueco": 15, "auto": 0,
         "horario": {d: [("09:00", "14:00"), ("16:00", "20:00")] for d in range(5)},
         "servicios": [
@@ -42,6 +43,7 @@ CLINICAS = [
                        "descontracturante para espalda y cervicales, relajante para el estrés, drenaje "
                        "linfático y masaje deportivo antes o después de competir. Confirmamos al instante.",
         "direccion": "Calle de Alcalá 45", "ciudad": "Madrid", "cp": "28014", "tel": "910000202",
+        "lat": 40.4189, "lon": -3.6968,
         "web": "", "caract": "domicilio,tarjeta,ingles", "hueco": 30, "auto": 1,
         "horario": {**{d: [("10:00", "14:00"), ("16:00", "21:00")] for d in range(5)}, 5: [("10:00", "14:00")]},
         "servicios": [
@@ -59,6 +61,7 @@ CLINICAS = [
                        "implantes y odontopediatría. Reservamos huecos cada día para urgencias "
                        "(dolor de muelas, rotura de diente). Trabajamos con las principales aseguradoras.",
         "direccion": "Paseo de la Castellana 210", "ciudad": "Madrid", "cp": "28046", "tel": "910000303",
+        "lat": 40.4639, "lon": -3.6898,
         "web": "", "caract": "accesible,parking,seguros,infantil,urgencias,tarjeta", "hueco": 30, "auto": 0,
         "horario": {d: [("09:00", "14:00"), ("15:30", "20:30")] for d in range(5)},
         "servicios": [
@@ -79,6 +82,7 @@ CLINICAS = [
                        "Unidad de suelo pélvico y punción seca. Sesiones individuales de verdad, sin aparatos "
                        "en cadena.",
         "direccion": "Calle Madrid 30", "ciudad": "Getafe", "cp": "28901", "tel": "910000404",
+        "lat": 40.3082, "lon": -3.7318,
         "web": "", "caract": "accesible,parking,seguros,ingles", "hueco": 15, "auto": 0,
         "horario": {**{d: [("08:00", "14:00"), ("16:00", "21:00")] for d in range(5)}, 5: [("09:00", "13:00")]},
         "servicios": [
@@ -89,6 +93,8 @@ CLINICAS = [
         ],
     },
 ]
+
+ADMIN = {"email": "admin@demo.es", "nombre": "Administración"}
 
 PACIENTE = {"email": "paciente@demo.es", "nombre": "Ana López", "tel": "600000001", "cp": "28010"}
 
@@ -127,10 +133,11 @@ def sembrar(ruta, borrar=False):
         uid = usuario(c["email"], "clinica", c["responsable"], c["tel"], c["cp"])
         cid = db.execute(
             "INSERT INTO clinicas (usuario_id, nombre, tipo, eslogan, descripcion, direccion, ciudad, "
-            "codigo_postal, telefono, web, color, caracteristicas, duracion_hueco, confirmacion_automatica) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "codigo_postal, telefono, web, color, caracteristicas, duracion_hueco, confirmacion_automatica, "
+            "lat, lon, creado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (uid, c["nombre"], c["tipo"], c["eslogan"], c["descripcion"], c["direccion"], c["ciudad"], c["cp"],
-             c["tel"], c["web"], c["color"], c["caract"], c["hueco"], c["auto"])).lastrowid
+             c["tel"], c["web"], c["color"], c["caract"], c["hueco"], c["auto"], c["lat"], c["lon"],
+             (ahora - timedelta(days=60)).isoformat())).lastrowid
         for dia, tramos in c["horario"].items():
             for ini, fin in tramos:
                 db.execute("INSERT INTO horarios (clinica_id, dia_semana, inicio, fin) VALUES (?, ?, ?, ?)",
@@ -139,6 +146,7 @@ def sembrar(ruta, borrar=False):
                                 "VALUES (?, ?, ?, ?, ?)", (cid, *s)).lastrowid for s in c["servicios"]]
         clinicas.append((cid, servicios, c))
 
+    usuario(ADMIN["email"], "admin", ADMIN["nombre"], "", "")
     ana = usuario(PACIENTE["email"], "paciente", PACIENTE["nombre"], PACIENTE["tel"], PACIENTE["cp"])
     otros = [usuario(e, "paciente", n, t, cp) for e, n, t, cp in OTROS]
 
@@ -198,6 +206,13 @@ def sembrar(ruta, borrar=False):
     # Vacaciones de ejemplo: la clínica podológica cierra un día la semana que viene.
     db.execute("INSERT INTO bloqueos (clinica_id, fecha, motivo) VALUES (?, ?, 'Formación del equipo')",
                (pod, proximo_laborable(hoy, 6).isoformat()))
+    # Actividad del mes en las fichas (vistas y clics), repartida en días pasados.
+    for (cid, _, _), (vistas, llamadas, mapa) in zip(clinicas, [(64, 9, 7), (41, 3, 5), (88, 14, 6), (37, 4, 2)]):
+        for tipo, n in (("vista", vistas), ("llamar", llamadas), ("mapa", mapa)):
+            for i in range(n):
+                momento = ahora - timedelta(days=i % max(ahora.day - 1, 1), hours=i % 9, minutes=i)
+                db.execute("INSERT INTO eventos (clinica_id, tipo, creado) VALUES (?, ?, ?)",
+                           (cid, tipo, momento.isoformat()))
     db.commit()
     db.close()
 

@@ -1,7 +1,8 @@
 {% extends "base.html" %}
 {% block titulo %}Buscar clínicas{% endblock %}
+{% block cabeza %}{% include "_leaflet.html" %}{% endblock %}
 {% block contenido %}
-<div class="dos" style="grid-template-columns: 280px 1fr">
+<div class="dos rejilla-buscar">
   <aside>
     <form class="tarjeta filtros" action="{{ url_for('buscar') }}">
       <h3>Filtrar</h3>
@@ -16,6 +17,14 @@
       </select>
       <label for="cp">Código postal</label>
       <input id="cp" name="cp" type="text" inputmode="numeric" maxlength="5" value="{{ cp }}">
+      <input type="hidden" name="lat" id="lat" value="{{ lat if lat is not none else '' }}">
+      <input type="hidden" name="lon" id="lon" value="{{ lon if lon is not none else '' }}">
+      {% if lat is not none %}
+        <p class="ayuda">📍 Usando tu ubicación. <a href="#" onclick="document.getElementById('lat').value='';document.getElementById('lon').value='';this.closest('form').submit();return false">Quitar</a></p>
+      {% else %}
+        <button type="button" class="secundario pequeno" id="ubicacion" style="margin-top:6px;width:100%">📍 Usar mi ubicación</button>
+        <p class="ayuda" id="ubicacion-aviso"></p>
+      {% endif %}
       <label for="franja">Franja</label>
       <select id="franja" name="franja">
         <option value="">Todo el día</option>
@@ -46,6 +55,7 @@
     {% if cp and not cp_ok %}<div class="aviso error">El código postal «{{ cp }}» no es válido; no podemos ordenar por cercanía.</div>{% endif %}
     {% if not cp %}<div class="aviso">Indica tu código postal para ver primero las clínicas más cercanas.</div>{% endif %}
     <p class="suave">{{ resultados|length }} resultado{{ '' if resultados|length == 1 else 's' }} · huecos de los próximos 7 días</p>
+    {% if puntos %}<div id="mapa" class="mapa tarjeta" style="padding:0"></div>{% endif %}
 
     {% for r in resultados %}{% set c = r.clinica %}
       {% set s = r.servicio_sugerido or (r.servicios[0] if r.servicios else None) %}
@@ -77,7 +87,7 @@
             </div>
           {% else %}
             <p class="pequeno suave">Sin huecos online esta semana.
-              {% if c.telefono %}<a href="tel:{{ c.telefono }}">Llama al {{ c.telefono }}</a> o <a href="{{ url_for('clinica', cid=c.id) }}#mensaje">deja un mensaje</a>.{% endif %}</p>
+              {% if c.telefono %}<a href="tel:{{ c.telefono }}" data-evento="llamar" data-csrf="{{ token_csrf() }}" data-url="{{ url_for('evento', cid=c.id) }}">Llama al {{ c.telefono }}</a> o <a href="{{ url_for('clinica', cid=c.id) }}#mensaje">deja un mensaje</a>.{% endif %}</p>
           {% endif %}
         </div>
       </article>
@@ -90,4 +100,19 @@
     {% endfor %}
   </section>
 </div>
+<script>
+  CitaMapa.resultados("mapa", {{ puntos|tojson }}, {{ [lat, lon]|tojson if lat is not none else 'null' }});
+  const botonUbicacion = document.getElementById("ubicacion");
+  if (botonUbicacion) botonUbicacion.addEventListener("click", () => {
+    const aviso = document.getElementById("ubicacion-aviso");
+    if (!navigator.geolocation) { aviso.textContent = "Tu navegador no permite compartir la ubicación."; return; }
+    aviso.textContent = "Buscando tu ubicación…";
+    navigator.geolocation.getCurrentPosition((pos) => {
+      document.getElementById("lat").value = pos.coords.latitude.toFixed(5);
+      document.getElementById("lon").value = pos.coords.longitude.toFixed(5);
+      botonUbicacion.closest("form").submit();
+    }, () => { aviso.textContent = "No hemos podido obtener tu ubicación. Usa el código postal."; },
+    { timeout: 10000 });
+  });
+</script>
 {% endblock %}

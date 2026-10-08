@@ -11,6 +11,8 @@ Arranque:
     python app.py            # arranca en http://127.0.0.1:5000
 """
 
+import csv
+import io
 import math
 import os
 import secrets
@@ -82,6 +84,8 @@ ESTADOS_OCUPAN = ("pendiente", "confirmada")
 
 DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 DIAS_CORTOS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+MESES_LARGOS = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre",
+                "octubre", "noviembre", "diciembre"]
 MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
 
 COLORES = ["#2a9d8f", "#264653", "#e76f51", "#6a4c93", "#1d70b8", "#d1495b", "#3a7d44", "#c77d00"]
@@ -112,7 +116,7 @@ CREATE TABLE IF NOT EXISTS usuarios (
     id INTEGER PRIMARY KEY,
     email TEXT UNIQUE NOT NULL,
     clave TEXT NOT NULL,
-    rol TEXT NOT NULL CHECK (rol IN ('paciente', 'clinica')),
+    rol TEXT NOT NULL CHECK (rol IN ('paciente', 'clinica', 'admin')),
     nombre TEXT NOT NULL,
     telefono TEXT DEFAULT '',
     codigo_postal TEXT DEFAULT '',
@@ -135,7 +139,12 @@ CREATE TABLE IF NOT EXISTS clinicas (
     caracteristicas TEXT DEFAULT '',
     duracion_hueco INTEGER DEFAULT 30,
     confirmacion_automatica INTEGER DEFAULT 0,
-    activa INTEGER DEFAULT 1
+    activa INTEGER DEFAULT 1,
+    lat REAL,
+    lon REAL,
+    tarifa REAL,             -- € por paciente nuevo; NULL = tarifa general
+    tope_mensual REAL,       -- máximo a facturar al mes; NULL = sin tope
+    creado TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS servicios (
     id INTEGER PRIMARY KEY,
@@ -172,6 +181,7 @@ CREATE TABLE IF NOT EXISTS citas (
     mensaje_paciente TEXT DEFAULT '',
     respuesta_clinica TEXT DEFAULT '',
     llamar_antes INTEGER DEFAULT 0,
+    ya_paciente INTEGER DEFAULT 0,  -- la clínica indica que ya era paciente suyo: no se factura
     visto_paciente INTEGER DEFAULT 1,
     creado TEXT NOT NULL
 );
@@ -196,7 +206,17 @@ CREATE TABLE IF NOT EXISTS valoraciones (
     comentario TEXT DEFAULT '',
     creado TEXT NOT NULL
 );
+-- Interacciones con la ficha (vistas, clics en llamar o en el mapa). Sirven para
+-- enseñar a cada clínica lo que le aporta la plataforma.
+CREATE TABLE IF NOT EXISTS eventos (
+    id INTEGER PRIMARY KEY,
+    clinica_id INTEGER NOT NULL REFERENCES clinicas(id),
+    tipo TEXT NOT NULL,
+    usuario_id INTEGER,
+    creado TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_citas_clinica_fecha ON citas(clinica_id, fecha);
+CREATE INDEX IF NOT EXISTS idx_eventos_clinica ON eventos(clinica_id, creado);
 """
 
 # --------------------------------------------------------------------------
@@ -255,12 +275,41 @@ def distancia_cp(cp_a, cp_b):
         return (0, "En tu código postal")
     if cp_a[:2] == cp_b[:2]:
         return (abs(int(cp_a) - int(cp_b)) / 1000, "En tu provincia")
-    (lat1, lon1), (lat2, lon2) = PROVINCIAS[cp_a[:2]], PROVINCIAS[cp_b[:2]]
+    km = km_entre(*PROVINCIAS[cp_a[:2]], *PROVINCIAS[cp_b[:2]])
+    return (km, f"A unos {round(km / 10) * 10:.0f} km")
+
+
+def km_entre(lat1, lon1, lat2, lon2):
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dp, dl = p2 - p1, math.radians(lon2 - lon1)
     h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-    km = 2 * 6371 * math.asin(math.sqrt(h))
-    return (km, f"A unos {round(km / 10) * 10:.0f} km")
+    return 2 * 6371 * math.asin(math.sqrt(h))
+
+
+def texto_km(km):
+    if km < 1:
+        return f"A {round(km * 1000 / 50) * 50:.0f} m"
+    return f"A {km:.1f} km".replace(".", ",")
+
+
+def coordenada(valor, limite):
+    try:
+        x = float(valor)
+    except (TypeError, ValueError):
+        return None
+    return x if -limite <= x <= limite else None
+
+
+def distancia(c, cp="", lat=None, lon=None):
+    """Distancia del paciente a la clínica: real si hay coordenadas, si no por código postal."""
+    if lat is not None and lon is not None:
+        if c["lat"] is not None and c["lon"] is not None:
+            km = km_entre(lat, lon, c["lat"], c["lon"])
+            return (km, texto_km(km))
+        # Sin chincheta no se puede medir: detrás de las que sí la tienen.
+        clave, texto = distancia_cp(cp, c["codigo_postal"]) if cp else (0, "")
+        return (10**5 + clave, texto)
+    return distancia_cp(cp, c["codigo_postal"]) if cp else (0, "")
 
 
 def tipos_por_necesidad(texto):
@@ -300,9 +349,40 @@ def app_actual():
 def iniciar_bd(ruta):
     Path(ruta).parent.mkdir(parents=True, exist_ok=True)
     db = conectar(ruta)
+    migrar(db)
     db.executescript(ESQUEMA)
     db.commit()
     return db
+
+
+def migrar(db):
+    """Pone al día bases creadas con versiones anteriores del esquema."""
+    tablas = {r[0]: r[1] for r in db.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table'")}
+    if "usuarios" in tablas and "'admin'" not in tablas["usuarios"]:
+        # SQLite no permite cambiar un CHECK: se reconstruye la tabla.
+        db.execute("PRAGMA foreign_keys = OFF")
+        db.executescript("""
+            CREATE TABLE usuarios_nueva (
+                id INTEGER PRIMARY KEY, email TEXT UNIQUE NOT NULL, clave TEXT NOT NULL,
+                rol TEXT NOT NULL CHECK (rol IN ('paciente', 'clinica', 'admin')),
+                nombre TEXT NOT NULL, telefono TEXT DEFAULT '', codigo_postal TEXT DEFAULT '',
+                creado TEXT NOT NULL);
+            INSERT INTO usuarios_nueva SELECT * FROM usuarios;
+            DROP TABLE usuarios;
+            ALTER TABLE usuarios_nueva RENAME TO usuarios;
+        """)
+        db.execute("PRAGMA foreign_keys = ON")
+    nuevas = {"clinicas": [("lat", "REAL"), ("lon", "REAL"), ("tarifa", "REAL"), ("tope_mensual", "REAL"),
+                           ("creado", "TEXT DEFAULT ''")],
+              "citas": [("ya_paciente", "INTEGER DEFAULT 0")]}
+    for tabla, columnas in nuevas.items():
+        if tabla not in tablas:
+            continue
+        existentes = {r[1] for r in db.execute(f"PRAGMA table_info({tabla})")}
+        for nombre, tipo in columnas:
+            if nombre not in existentes:
+                db.execute(f"ALTER TABLE {tabla} ADD COLUMN {nombre} {tipo}")
+    db.commit()
 
 
 def una(sql, *args):
@@ -383,7 +463,8 @@ def hueco_disponible(db, clinica, fecha, hora, duracion):
 # --------------------------------------------------------------------------
 
 
-def buscar_clinicas(db, tipo="", necesidad="", cp="", franja="", requisitos=(), orden="distancia"):
+def buscar_clinicas(db, tipo="", necesidad="", cp="", franja="", requisitos=(), orden="distancia",
+                    lat=None, lon=None):
     tipos_inferidos = tipos_por_necesidad(necesidad) if necesidad and not tipo else []
     terminos = palabras(necesidad)
     resultados = []
@@ -422,7 +503,7 @@ def buscar_clinicas(db, tipo="", necesidad="", cp="", franja="", requisitos=(), 
         elif franja == "tarde":
             semana = [(d, [h for h in hs if h >= "14:00"]) for d, hs in semana]
         proximos = [(d, h) for d, hs in semana for h in hs]
-        dist, dist_texto = distancia_cp(cp, c["codigo_postal"]) if cp else (0, "")
+        dist, dist_texto = distancia(c, cp, lat, lon)
         media = db.execute("SELECT AVG(puntuacion) m, COUNT(*) n FROM valoraciones WHERE clinica_id = ?",
                            (c["id"],)).fetchone()
         resultados.append({
@@ -455,6 +536,95 @@ def buscar_clinicas(db, tipo="", necesidad="", cp="", franja="", requisitos=(), 
 
 
 # --------------------------------------------------------------------------
+# Captación y facturación
+# --------------------------------------------------------------------------
+
+TARIFA_POR_DEFECTO = float(os.environ.get("CITAS_TARIFA", "8"))
+TIPOS_EVENTO = ("vista", "llamar", "mapa", "web")
+
+
+def rango_mes(mes):
+    """'2026-10' -> (date(2026,10,1), date(2026,11,1)). Mes no válido -> mes actual."""
+    try:
+        inicio = datetime.strptime(mes, "%Y-%m").date()
+    except (TypeError, ValueError):
+        inicio = ahora().date().replace(day=1)
+    fin = (inicio.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return inicio, fin
+
+
+def captaciones(db, desde, hasta, clinica_id=None):
+    """Pacientes nuevos que la plataforma ha llevado a cada clínica.
+
+    Cuenta la PRIMERA cita confirmada o realizada de cada paciente en cada
+    clínica, cuya fecha cae en [desde, hasta). Las que la clínica marca como
+    «ya era paciente» se devuelven con ya_paciente = 1 y no se facturan.
+    """
+    filtro = "AND ci.clinica_id = ?" if clinica_id else ""
+    args = [desde.isoformat(), hasta.isoformat()] + ([clinica_id] if clinica_id else [])
+    return db.execute(f"""
+        SELECT ci.*, u.nombre paciente, u.email, u.telefono, cl.nombre clinica, s.nombre servicio
+        FROM citas ci
+        JOIN usuarios u ON u.id = ci.paciente_id
+        JOIN clinicas cl ON cl.id = ci.clinica_id
+        LEFT JOIN servicios s ON s.id = ci.servicio_id
+        WHERE ci.estado IN ('confirmada', 'completada') AND ci.fecha >= ? AND ci.fecha < ? {filtro}
+          AND NOT EXISTS (
+            SELECT 1 FROM citas p
+            WHERE p.paciente_id = ci.paciente_id AND p.clinica_id = ci.clinica_id
+              AND p.estado IN ('confirmada', 'completada')
+              AND (p.fecha || ' ' || p.hora || printf('%09d', p.id))
+                  < (ci.fecha || ' ' || ci.hora || printf('%09d', ci.id)))
+        ORDER BY ci.fecha, ci.hora""", args).fetchall()
+
+
+def importe(clinica, nuevos_facturables):
+    tarifa = clinica["tarifa"] if clinica["tarifa"] is not None else TARIFA_POR_DEFECTO
+    total = nuevos_facturables * tarifa
+    if clinica["tope_mensual"] is not None:
+        total = min(total, clinica["tope_mensual"])
+    return tarifa, total
+
+
+def resumen_clinica(db, clinica, desde, hasta):
+    """Embudo del mes para una clínica: de la vista de la ficha al paciente nuevo."""
+    cid = clinica["id"]
+    rango = (desde.isoformat(), hasta.isoformat())
+    eventos = dict(db.execute("SELECT tipo, COUNT(*) FROM eventos WHERE clinica_id = ? AND creado >= ? "
+                              "AND creado < ? GROUP BY tipo", (cid, *rango)).fetchall())
+    solicitudes = db.execute("SELECT COUNT(*) FROM citas WHERE clinica_id = ? AND creado >= ? AND creado < ?",
+                             (cid, *rango)).fetchone()[0]
+    mensajes = db.execute("SELECT COUNT(*) FROM mensajes WHERE clinica_id = ? AND creado >= ? AND creado < ?",
+                          (cid, *rango)).fetchone()[0]
+    nuevos = captaciones(db, desde, hasta, cid)
+    facturables = sum(1 for n in nuevos if not n["ya_paciente"])
+    tarifa, total = importe(clinica, facturables)
+    return {"clinica": clinica, "vistas": eventos.get("vista", 0), "llamadas": eventos.get("llamar", 0),
+            "mapa": eventos.get("mapa", 0), "mensajes": mensajes, "solicitudes": solicitudes,
+            "nuevos": len(nuevos), "facturables": facturables, "tarifa": tarifa, "importe": total,
+            "detalle": nuevos}
+
+
+def registrar_evento(db, clinica_id, tipo, usuario_id=None):
+    db.execute("INSERT INTO eventos (clinica_id, tipo, usuario_id, creado) VALUES (?, ?, ?, ?)",
+               (clinica_id, tipo, usuario_id, ahora().isoformat()))
+    db.commit()
+
+
+def asegurar_admin(ruta, email, clave):
+    """Crea o actualiza la cuenta de administración indicada por variables de entorno."""
+    db = conectar(ruta)
+    hash_clave = generate_password_hash(clave)
+    if db.execute("SELECT 1 FROM usuarios WHERE email = ?", (email,)).fetchone():
+        db.execute("UPDATE usuarios SET clave = ?, rol = 'admin' WHERE email = ?", (hash_clave, email))
+    else:
+        db.execute("INSERT INTO usuarios (email, clave, rol, nombre, creado) VALUES (?, ?, 'admin', ?, ?)",
+                   (email, hash_clave, "Administración", ahora().isoformat()))
+    db.commit()
+    db.close()
+
+
+# --------------------------------------------------------------------------
 # Aplicación
 # --------------------------------------------------------------------------
 
@@ -480,11 +650,15 @@ def crear_app(config=None):
     if app.config["DEMO"] and vacia:
         from datos_demo import sembrar
         sembrar(app.config["BASE_DATOS"])
+    if os.environ.get("CITAS_ADMIN_EMAIL") and os.environ.get("CITAS_ADMIN_CLAVE"):
+        asegurar_admin(app.config["BASE_DATOS"], os.environ["CITAS_ADMIN_EMAIL"].lower(),
+                       os.environ["CITAS_ADMIN_CLAVE"])
 
-    app.jinja_env.filters.update(fecha_bonita=fecha_bonita, fecha_corta=fecha_corta)
+    app.jinja_env.filters.update(fecha_bonita=fecha_bonita, fecha_corta=fecha_corta,
+                                 euros=lambda x: f"{x:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
     app.jinja_env.globals.update(TIPOS=TIPOS, CARACTERISTICAS=CARACTERISTICAS,
                                  ESTADOS_CITA=ESTADOS_CITA, DIAS=DIAS, COLORES=COLORES,
-                                 csrf=campo_csrf, puede_valorarse=puede_valorarse,
+                                 csrf=campo_csrf, token_csrf=token_csrf, puede_valorarse=puede_valorarse,
                                  demo=app.config["DEMO"], cuentas_demo=cuentas_demo)
 
     @app.teardown_appcontext
@@ -523,9 +697,10 @@ def crear_app(config=None):
 
 
 def cuentas_demo():
-    from datos_demo import CLINICAS, PACIENTE
+    from datos_demo import ADMIN, CLINICAS, PACIENTE
     return ([("👤 Paciente · " + PACIENTE["nombre"], PACIENTE["email"])]
-            + [(f"{TIPOS[c['tipo']][1]} {c['nombre']}", c["email"]) for c in CLINICAS])
+            + [(f"{TIPOS[c['tipo']][1]} {c['nombre']}", c["email"]) for c in CLINICAS]
+            + [("🛠️ Administración de la plataforma", ADMIN["email"])])
 
 
 def clave_secreta():
@@ -555,8 +730,8 @@ def requiere(rol):
                 siguiente = request.full_path if request.method == "GET" else None
                 return redirect(url_for("entrar", siguiente=siguiente))
             if g.usuario["rol"] != rol:
-                flash("Esa sección es para cuentas de " + ("paciente" if rol == "paciente" else "clínica") + ".",
-                      "error")
+                flash("Esa sección es para cuentas de "
+                      + {"paciente": "paciente", "clinica": "clínica", "admin": "administración"}[rol] + ".", "error")
                 return redirect(url_for("inicio"))
             if rol == "clinica" and not g.clinica:
                 abort(404)
@@ -638,10 +813,28 @@ def registrar_rutas(app):
         franja = request.args.get("franja", "")
         orden = request.args.get("orden", "distancia")
         requisitos = [r for r in request.args.getlist("req") if r in CARACTERISTICAS]
-        resultados, inferidos = buscar_clinicas(get_db(), tipo, necesidad, cp, franja, requisitos, orden)
+        lat, lon = coordenada(request.args.get("lat"), 90), coordenada(request.args.get("lon"), 180)
+        if lat is None or lon is None:
+            lat = lon = None
+        resultados, inferidos = buscar_clinicas(get_db(), tipo, necesidad, cp, franja, requisitos, orden,
+                                                lat, lon)
+        puntos = []
+        for r in resultados:
+            c = r["clinica"]
+            if c["lat"] is None:
+                continue
+            s = r["servicio_sugerido"] or (r["servicios"][0] if r["servicios"] else None)
+            puntos.append({
+                "nombre": c["nombre"], "lat": c["lat"], "lon": c["lon"], "color": c["color"],
+                "tipo": TIPOS[c["tipo"]][0], "distancia": r["distancia_texto"],
+                "proximo": (f"{fecha_corta(r['proximos'][0][0])} · {r['proximos'][0][1]}"
+                            if r["proximos"] else "Sin huecos esta semana"),
+                "url": url_for("clinica", cid=c["id"], servicio=s["id"] if s else None),
+            })
         return render_template("buscar.html", resultados=resultados, inferidos=inferidos, tipo=tipo,
                                necesidad=necesidad, cp=cp, franja=franja, orden=orden,
-                               requisitos=requisitos, cp_ok=cp_valido(cp))
+                               requisitos=requisitos, cp_ok=cp_valido(cp), lat=lat, lon=lon,
+                               puntos=puntos)
 
     @app.route("/clinica/<int:cid>")
     def clinica(cid):
@@ -663,13 +856,25 @@ def registrar_rutas(app):
             "SELECT v.*, u.nombre FROM valoraciones v JOIN usuarios u ON u.id = v.paciente_id "
             "WHERE v.clinica_id = ? ORDER BY v.creado DESC LIMIT 6", cid)
         media = una("SELECT AVG(puntuacion) m, COUNT(*) n FROM valoraciones WHERE clinica_id = ?", cid)
-        distancia = ""
+        dist_texto = ""
         if g.usuario and g.usuario["rol"] == "paciente":
-            distancia = distancia_cp(g.usuario["codigo_postal"], c["codigo_postal"])[1]
+            dist_texto = distancia_cp(g.usuario["codigo_postal"], c["codigo_postal"])[1]
+        # Cuenta la visita salvo que mire la propia clínica o administración.
+        es_propia = (g.clinica and g.clinica["id"] == cid) or (g.usuario and g.usuario["rol"] == "admin")
+        if not es_propia and semana == 0 and not request.args.get("servicio"):
+            registrar_evento(get_db(), cid, "vista", g.usuario["id"] if g.usuario else None)
         return render_template("clinica.html", c=c, servicios=servicios, servicio=servicio, huecos=huecos,
                                semana=semana, horario=horario, valoraciones=valoraciones, media=media,
                                caract=set(filter(None, c["caracteristicas"].split(","))),
-                               distancia=distancia)
+                               distancia=dist_texto)
+
+    @app.route("/clinica/<int:cid>/evento", methods=["POST"])
+    def evento(cid):
+        """Clic en llamar, cómo llegar o web (lo envía el navegador con sendBeacon)."""
+        tipo = request.form.get("tipo")
+        if tipo in TIPOS_EVENTO and tipo != "vista" and una("SELECT 1 FROM clinicas WHERE id = ?", cid):
+            registrar_evento(get_db(), cid, tipo, g.usuario["id"] if g.usuario else None)
+        return "", 204
 
     @app.route("/clinica/<int:cid>/reservar", methods=["GET", "POST"])
     @requiere("paciente")
@@ -778,9 +983,9 @@ def registrar_rutas(app):
                                   ahora().isoformat()))
                 uid = cur.lastrowid
                 cur = db.execute("INSERT INTO clinicas (usuario_id, nombre, tipo, codigo_postal, telefono, "
-                                 "direccion, ciudad, color) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                 "direccion, ciudad, color, creado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                                  (uid, nombre, tipo, cp, tel, campo("direccion", 200), campo("ciudad", 80),
-                                  secrets.choice(COLORES)))
+                                  secrets.choice(COLORES), ahora().isoformat()))
                 horario_por_defecto(db, cur.lastrowid)
                 db.commit()
                 iniciar_sesion(uid)
@@ -798,7 +1003,7 @@ def registrar_rutas(app):
             u = una("SELECT * FROM usuarios WHERE email = ?", campo("email", 200).lower())
             if u and check_password_hash(u["clave"], request.form.get("clave", "")):
                 iniciar_sesion(u["id"])
-                destino = siguiente or url_for("panel" if u["rol"] == "clinica" else "inicio")
+                destino = siguiente or url_for({"clinica": "panel", "admin": "admin"}.get(u["rol"], "inicio"))
                 return redirect(destino)
             flash("Email o contraseña incorrectos.", "error")
         return render_template("entrar.html", siguiente=siguiente)
@@ -918,8 +1123,13 @@ def registrar_rutas(app):
             faltan.append(("Escribe una descripción de tu clínica", url_for("panel_perfil")))
         if not g.clinica["foto"]:
             faltan.append(("Sube una foto", url_for("panel_perfil")))
+        if g.clinica["lat"] is None:
+            faltan.append(("Sitúa tu clínica en el mapa", url_for("panel_perfil") + "#mapa"))
+        desde, hasta = rango_mes("")
+        rendimiento = resumen_clinica(get_db(), g.clinica, desde, hasta)
         return render_template("panel.html", pendientes=pendientes, dias_agenda=dias_agenda,
-                               por_completar=por_completar, mensajes=mensajes, libres=libres, faltan=faltan)
+                               por_completar=por_completar, mensajes=mensajes, libres=libres, faltan=faltan,
+                               rendimiento=rendimiento, mes=MESES_LARGOS[desde.month - 1])
 
     @app.route("/panel/cita/<int:id>/<accion>", methods=["POST"])
     @requiere("clinica")
@@ -935,8 +1145,9 @@ def registrar_rutas(app):
             abort(404)
         respuesta = campo("respuesta", 800)
         db = get_db()
-        db.execute("UPDATE citas SET estado = ?, respuesta_clinica = ?, visto_paciente = 0 WHERE id = ?",
-                   (transiciones[accion][1], respuesta or c["respuesta_clinica"], id))
+        ya_paciente = 1 if request.form.get("ya_paciente") else c["ya_paciente"]
+        db.execute("UPDATE citas SET estado = ?, respuesta_clinica = ?, visto_paciente = 0, ya_paciente = ? "
+                   "WHERE id = ?", (transiciones[accion][1], respuesta or c["respuesta_clinica"], ya_paciente, id))
         db.commit()
         flash({"confirmar": "Cita confirmada.", "rechazar": "Solicitud rechazada; el paciente lo verá en su panel.",
                "cancelar": "Cita cancelada y paciente avisado en su panel.",
@@ -975,15 +1186,18 @@ def registrar_rutas(app):
             caract = ",".join(k for k in CARACTERISTICAS if request.form.get("c_" + k))
             duracion = request.form.get("duracion_hueco", type=int)
             duracion = duracion if duracion in (15, 20, 30, 45, 60) else c["duracion_hueco"]
+            lat, lon = coordenada(request.form.get("lat"), 90), coordenada(request.form.get("lon"), 180)
+            if lat is None or lon is None:
+                lat, lon = c["lat"], c["lon"]
             db = get_db()
             db.execute(
                 "UPDATE clinicas SET nombre=?, tipo=?, eslogan=?, descripcion=?, direccion=?, ciudad=?, "
                 "codigo_postal=?, telefono=?, web=?, foto=?, color=?, caracteristicas=?, duracion_hueco=?, "
-                "confirmacion_automatica=?, activa=? WHERE id=?",
+                "confirmacion_automatica=?, activa=?, lat=?, lon=? WHERE id=?",
                 (nombre, tipo, campo("eslogan", 140), campo("descripcion", 3000), campo("direccion", 200),
                  campo("ciudad", 80), cp, campo("telefono", 30), campo("web", 200), foto, color, caract,
                  duracion, 1 if request.form.get("confirmacion_automatica") else 0,
-                 1 if request.form.get("activa") else 0, c["id"]))
+                 1 if request.form.get("activa") else 0, lat, lon, c["id"]))
             db.commit()
             flash("Ficha guardada.", "ok")
             return redirect(url_for("panel_perfil"))
@@ -1095,6 +1309,86 @@ def registrar_rutas(app):
         db.execute("DELETE FROM bloqueos WHERE id = ? AND clinica_id = ?", (id, g.clinica["id"]))
         db.commit()
         return redirect(url_for("panel_horario"))
+
+    # ---------------------------------------------------------------- administración
+
+    def meses_disponibles():
+        hoy = ahora().date().replace(day=1)
+        meses = []
+        for _ in range(12):
+            meses.append((hoy.strftime("%Y-%m"), f"{MESES_LARGOS[hoy.month - 1]} {hoy.year}"))
+            hoy = (hoy - timedelta(days=1)).replace(day=1)
+        return meses
+
+    @app.route("/admin")
+    @requiere("admin")
+    def admin():
+        mes = request.args.get("mes", "")
+        desde, hasta = rango_mes(mes)
+        db = get_db()
+        filas = [resumen_clinica(db, c, desde, hasta)
+                 for c in db.execute("SELECT * FROM clinicas ORDER BY nombre")]
+        filas.sort(key=lambda f: (-f["importe"], -f["nuevos"], f["clinica"]["nombre"]))
+        rango = (desde.isoformat(), hasta.isoformat())
+        totales = {
+            "clinicas": sum(1 for f in filas if f["clinica"]["activa"]),
+            "clinicas_nuevas": db.execute("SELECT COUNT(*) FROM clinicas WHERE creado >= ? AND creado < ?",
+                                          rango).fetchone()[0],
+            "pacientes": db.execute("SELECT COUNT(*) FROM usuarios WHERE rol = 'paciente'").fetchone()[0],
+            "pacientes_nuevos": db.execute("SELECT COUNT(*) FROM usuarios WHERE rol = 'paciente' AND creado >= ? "
+                                           "AND creado < ?", rango).fetchone()[0],
+            **{k: sum(f[k] for f in filas) for k in ("vistas", "llamadas", "mensajes", "solicitudes", "nuevos",
+                                                      "facturables", "importe")},
+        }
+        sin_actividad = [f for f in filas if f["clinica"]["activa"] and not f["vistas"] and not f["solicitudes"]]
+        return render_template("admin.html", filas=filas, totales=totales, mes=desde.strftime("%Y-%m"),
+                               meses=meses_disponibles(), titulo_mes=f"{MESES_LARGOS[desde.month - 1]} {desde.year}",
+                               tarifa_general=TARIFA_POR_DEFECTO, sin_actividad=sin_actividad)
+
+    @app.route("/admin/clinica/<int:cid>", methods=["GET", "POST"])
+    @requiere("admin")
+    def admin_clinica(cid):
+        db = get_db()
+        c = una("SELECT * FROM clinicas WHERE id = ?", cid)
+        if not c:
+            abort(404)
+        mes = request.values.get("mes", "")
+        if request.method == "POST":
+            def importe_o_nada(nombre):
+                texto = campo(nombre, 12).replace(",", ".")
+                try:
+                    return max(0.0, float(texto)) if texto else None
+                except ValueError:
+                    return None
+            db.execute("UPDATE clinicas SET tarifa = ?, tope_mensual = ?, activa = ? WHERE id = ?",
+                       (importe_o_nada("tarifa"), importe_o_nada("tope_mensual"),
+                        1 if request.form.get("activa") else 0, cid))
+            db.commit()
+            flash("Condiciones de la clínica guardadas.", "ok")
+            return redirect(url_for("admin_clinica", cid=cid, mes=mes))
+        desde, hasta = rango_mes(mes)
+        resumen = resumen_clinica(db, c, desde, hasta)
+        responsable = una("SELECT * FROM usuarios WHERE id = ?", c["usuario_id"])
+        return render_template("admin_clinica.html", c=c, r=resumen, responsable=responsable,
+                               mes=desde.strftime("%Y-%m"), meses=meses_disponibles(),
+                               titulo_mes=f"{MESES_LARGOS[desde.month - 1]} {desde.year}",
+                               tarifa_general=TARIFA_POR_DEFECTO)
+
+    @app.route("/admin/captaciones.csv")
+    @requiere("admin")
+    def admin_csv():
+        desde, hasta = rango_mes(request.args.get("mes", ""))
+        db = get_db()
+        salida = io.StringIO()
+        w = csv.writer(salida, delimiter=";")
+        w.writerow(["clinica", "fecha", "hora", "paciente", "email", "servicio", "estado", "facturable"])
+        for n in captaciones(db, desde, hasta):
+            w.writerow([n["clinica"], n["fecha"], n["hora"], n["paciente"], n["email"], n["servicio"] or "",
+                        n["estado"], "no (ya era paciente)" if n["ya_paciente"] else "sí"])
+        nombre = f"captaciones-{desde.strftime('%Y-%m')}.csv"
+        # BOM para que Excel abra bien los acentos.
+        return app.response_class("\ufeff" + salida.getvalue(), mimetype="text/csv",
+                                  headers={"Content-Disposition": f"attachment; filename={nombre}"})
 
     @app.errorhandler(404)
     def no_encontrado(_):
