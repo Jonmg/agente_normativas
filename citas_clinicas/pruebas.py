@@ -330,6 +330,111 @@ class Franjas(Base):
         self.assertIn("hora por confirmar", html)
 
 
+class Recordatorio(Base):
+    LUNES = date(2026, 10, 12)
+
+    def enviar(self, forzar=False):
+        with self.app.test_request_context():
+            return {c["nombre"]: r for c, r in modulo.enviar_recordatorios(modulo.get_db(), forzar)}
+
+    def test_solo_a_quien_falta_publicar(self):
+        r = self.enviar()
+        # Podología ya tiene la semana publicada; masaje y fisio usan agenda exacta.
+        self.assertEqual(r, {"Clínica Dental Sonrisa Norte": "en_bandeja", "Podología Pasos": "ya_publicado"})
+        aviso = self.db().execute("SELECT * FROM avisos").fetchone()
+        self.assertEqual(aviso["semana"], "2026-10-12")
+        self.assertIn("del 12 al 18 de octubre", aviso["asunto"])
+        self.assertIn("/huecos-rapidos/", aviso["enlace"])
+        self.assertTrue(aviso["cuerpo"].startswith("Hola Carmen:"))  # sin el «Dra.»
+        self.assertIn("recibiste", aviso["cuerpo"])
+        self.assertEqual(self.enviar()["Clínica Dental Sonrisa Norte"], "ya_avisado")  # no se repite
+        self.assertEqual(self.enviar(forzar=True)["Clínica Dental Sonrisa Norte"], "en_bandeja")
+
+    def test_quien_no_quiere_recordatorio(self):
+        db = self.db()
+        db.execute("UPDATE clinicas SET recordatorio = 0 WHERE id = 3")
+        db.commit()
+        self.assertNotIn("Clínica Dental Sonrisa Norte", self.enviar())
+
+    def test_email(self):
+        with mock.patch.dict("os.environ", {"CITAS_SMTP_HOST": "smtp.ejemplo.es", "CITAS_SMTP_USUARIO": "u",
+                                             "CITAS_SMTP_CLAVE": "c"}), \
+             mock.patch("smtplib.SMTP") as smtp:
+            r = self.enviar()
+        self.assertEqual(r["Clínica Dental Sonrisa Norte"], "enviado")
+        servidor = smtp.return_value.__enter__.return_value
+        servidor.login.assert_called_once_with("u", "c")
+        mensaje = servidor.send_message.call_args[0][0]
+        self.assertEqual(mensaje["To"], "dental@demo.es")
+        self.assertIn("/huecos-rapidos/", mensaje.get_body(("plain",)).get_content())
+
+    def test_error_de_correo_se_reintenta(self):
+        with mock.patch.dict("os.environ", {"CITAS_SMTP_HOST": "smtp.ejemplo.es"}), \
+             mock.patch("smtplib.SMTP", side_effect=OSError("sin red")):
+            self.assertEqual(self.enviar()["Clínica Dental Sonrisa Norte"], "error")
+            self.assertEqual(self.enviar()["Clínica Dental Sonrisa Norte"], "error")  # no cuenta como avisada
+
+    def test_enlace_rapido_publica_sin_contrasena(self):
+        self.enviar()
+        enlace = self.db().execute("SELECT enlace FROM avisos").fetchone()[0]
+        ruta = enlace.split("localhost", 1)[1]
+        html = self.cli.get(ruta).get_data(as_text=True)
+        self.assertIn("Semana del 12 al 18 de octubre", html)
+        # Propone lo publicado 7 días antes: el lunes 5 por la mañana tenía 2.
+        self.assertIn('name="2026-10-12_manana" min="0" max="50"\n                           value="2"', html)
+        self.assertNotEqual(self.db().execute("SELECT abierto FROM avisos").fetchone()[0], "")
+        r = self.post(ruta, **{"2026-10-12_manana": "4", "2026-10-12_tarde": "1", "2026-10-13_manana": "2"})
+        self.assertIn("tiene publicados <b>7 huecos</b>", r.get_data(as_text=True))
+        db = self.db()
+        self.assertTrue(modulo.semana_publicada(db, 3, self.LUNES))
+        self.assertNotEqual(db.execute("SELECT publicado FROM avisos").fetchone()[0], "")
+        self.assertEqual(self.enviar()["Clínica Dental Sonrisa Norte"], "ya_publicado")
+
+    def test_propuesta_usa_el_ultimo_valor_de_cada_dia(self):
+        db = self.db()
+        c = db.execute("SELECT * FROM clinicas WHERE id = 3").fetchone()
+        # Hace dos semanas el martes por la tarde tenía 5; la semana pasada no publicó ese hueco.
+        db.execute("INSERT INTO cupos (clinica_id, fecha, franja, plazas) VALUES (3, '2026-09-29', 'tarde', 5)")
+        db.execute("DELETE FROM cupos WHERE clinica_id = 3 AND fecha = '2026-10-06' AND franja = 'tarde'")
+        db.commit()
+        propuesta = modulo.propuesta_semana(db, c, self.LUNES)
+        self.assertEqual(propuesta[("2026-10-13", "tarde")], 5)
+        self.assertEqual(propuesta[("2026-10-12", "manana")], 2)  # lo de la semana pasada
+        self.assertEqual(propuesta[("2026-10-17", "manana")], 0)  # sábado: nunca publicó
+
+    def test_enlace_falso_o_caducado(self):
+        r = self.cli.get("/huecos-rapidos/esto-no-es-un-token")
+        self.assertEqual(r.status_code, 400)
+        with self.app.test_request_context():
+            token = modulo.token_huecos(3, self.LUNES)
+        import time
+        with mock.patch("itsdangerous.timed.time.time", return_value=time.time() + 11 * 24 * 3600):
+            self.assertIn("Enlace caducado", self.cli.get(f"/huecos-rapidos/{token}").get_data(as_text=True))
+
+    def test_tarea_programada(self):
+        self.assertEqual(self.cli.post("/tareas/recordatorios").status_code, 404)  # sin clave: desactivada
+        with mock.patch.dict("os.environ", {"CITAS_TAREAS_CLAVE": "secreta"}):
+            self.assertEqual(self.cli.post("/tareas/recordatorios",
+                                           headers={"Authorization": "Bearer otra"}).status_code, 403)
+            r = self.cli.post("/tareas/recordatorios", headers={"Authorization": "Bearer secreta"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.get_json()["semana"], "2026-10-12")
+
+    def test_admin_y_whatsapp(self):
+        self.entrar("admin@demo.es")
+        html = self.cli.get("/admin").get_data(as_text=True)
+        self.assertIn("Recordatorio semanal · semana del 12 al 18 de octubre", html)
+        self.assertIn("https://wa.me/34910000303?text=", html)
+        r = self.post("/admin/recordatorios")
+        self.assertIn("1 en la bandeja de salida, 1 ya habían publicado", r.get_data(as_text=True))
+
+    def test_aviso_en_panel_desde_el_jueves(self):
+        self.entrar("dental@demo.es")
+        self.assertNotIn("semana que viene", self.cli.get("/panel").get_data(as_text=True))
+        with mock.patch.object(modulo, "ahora", lambda: datetime(2026, 10, 8, 10, 0)):
+            self.assertIn("Publica tus huecos de la semana que viene", self.cli.get("/panel").get_data(as_text=True))
+
+
 class Captacion(Base):
     OCTUBRE = (date(2026, 10, 1), date(2026, 11, 1))
 

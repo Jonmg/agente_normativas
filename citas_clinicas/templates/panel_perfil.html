@@ -58,6 +58,8 @@
         <label class="casilla"><input type="radio" name="modo" value="{{ k }}" {% if c.modo == k %}checked{% endif %}> {{ texto }}</label>
       {% endfor %}
       <p class="ayuda">Por franjas es lo más rápido: un par de minutos a la semana. La agenda exacta permite que el paciente reserve una hora concreta.</p>
+      <label class="casilla"><input type="checkbox" name="recordatorio" value="1" {% if c.recordatorio %}checked{% endif %}>
+        Recordatorio semanal: los viernes, un email con enlace para publicar los huecos de la semana siguiente</label>
       <label for="duracion_hueco">Agenda exacta: cada cuánto empiezan los huecos</label>
       <select id="duracion_hueco" name="duracion_hueco">
         {% for m in [15, 20, 30, 45, 60] %}<option value="{{ m }}" {% if m == c.duracion_hueco %}selected{% endif %}>Cada {{ m }} min</option>{% endfor %}

@@ -22,5 +22,10 @@ services:
         generateValue: true
       - key: CITAS_TARIFA
         value: "8"
+      # Recordatorio semanal: clave compartida con GitHub Actions (secreto CITAS_TAREAS_CLAVE).
+      - key: CITAS_TAREAS_CLAVE
+        sync: false
+      # Correo (opcional; sin él los avisos quedan en la bandeja del panel de administración):
+      # CITAS_SMTP_HOST, CITAS_SMTP_PUERTO, CITAS_SMTP_USUARIO, CITAS_SMTP_CLAVE, CITAS_SMTP_REMITENTE.
       # Para una cuenta de administración propia (además de admin@demo.es en la demo),
       # añade en el panel de Render CITAS_ADMIN_EMAIL y CITAS_ADMIN_CLAVE.

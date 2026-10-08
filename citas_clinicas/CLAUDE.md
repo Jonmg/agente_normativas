@@ -18,5 +18,8 @@ hay usuarios, citas y concurrencia de reservas.
   por paciente y clínica). Es la pieza de la que sale la factura: cambiarla con pruebas.
 - Mapa: Leaflet 1.9.4 por CDN + OpenStreetMap. Todo el JS de mapa vive en `static/mapa.js`
   y debe degradar sin error si `L` no existe.
+- Recordatorio semanal: `enviar_recordatorios()` (necesita contexto de petición para las URL).
+  Enlaces sin contraseña firmados con itsdangerous (`token_huecos`), salt propio y caducidad.
+  La ruta `/tareas/recordatorios` no lleva CSRF: se autentica con `CITAS_TAREAS_CLAVE`.
 - Esquema: los cambios se añaden también a `migrar()` para no romper bases existentes.
 - Pruebas: `python pruebas.py` (offline, base de datos temporal).

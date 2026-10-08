@@ -59,6 +59,45 @@
   </div>
 </section>
 
+<section class="tarjeta" id="recordatorios">
+  <div class="fila" style="justify-content:space-between;align-items:center">
+    <h2 style="flex:1 1 auto;margin:0">Recordatorio semanal · semana {{ semana_siguiente }}</h2>
+    <form method="post" action="{{ url_for('admin_recordatorios') }}" style="flex:0 0 auto">{{ csrf() }}
+      <button class="pequeno">Enviar recordatorios ahora</button></form>
+  </div>
+  <p class="suave pequeno">Se envía solo cada viernes (GitHub Actions) a las clínicas por franjas que aún no han publicado la semana que viene.
+    {% if smtp %}El correo está configurado.{% else %}<b>Sin correo configurado:</b> los avisos quedan aquí abajo; envíalos por WhatsApp con un clic.{% endif %}</p>
+  {% if pendientes_semana %}
+    <h3>Sin huecos publicados para esa semana</h3>
+    {% for p in pendientes_semana %}
+      <div class="cita">
+        <div><b>{{ p.clinica.nombre }}</b> · {{ p.clinica.telefono }}<br>
+          <span class="pequeno suave">{% if not p.aviso %}Sin avisar todavía
+            {% elif p.aviso.abierto %}Abrió el enlace el {{ p.aviso.abierto[:10] }}, pero no publicó
+            {% else %}Avisada el {{ p.aviso.creado[:10] }} ({{ {'enviado': 'email enviado', 'en_bandeja': 'en bandeja', 'error': 'error al enviar'}[p.aviso.estado] }}){% endif %}</span></div>
+        {% if p.whatsapp %}<a class="boton secundario pequeno" style="flex:0 0 auto" target="_blank" rel="noopener" href="{{ p.whatsapp }}">💬 Avisar por WhatsApp</a>{% endif %}
+      </div>
+    {% endfor %}
+  {% else %}
+    <p class="aviso ok">Todas las clínicas por franjas tienen huecos publicados para esa semana. 🎉</p>
+  {% endif %}
+  {% if avisos %}
+    <details style="margin-top:12px"><summary>Últimos avisos ({{ avisos|length }})</summary>
+      <div class="tabla-scroll"><table style="min-width:560px">
+        <tr><th>Fecha</th><th>Clínica</th><th>Canal</th><th>Estado</th><th>Respuesta</th><th></th></tr>
+        {% for a in avisos %}
+          <tr><td>{{ a.creado[:10] }}</td><td>{{ a.clinica }}</td><td>{{ a.canal }}</td>
+            <td>{{ a.estado }}{% if a.error %}<br><span class="pequeno" style="color:var(--error)">{{ a.error }}</span>{% endif %}</td>
+            <td>{% if a.publicado %}✅ Publicó{% elif a.abierto %}Abierto{% else %}—{% endif %}</td>
+            <td><details><summary class="pequeno">Ver</summary>
+              <p class="pequeno"><b>{{ a.asunto }}</b></p><pre class="pequeno" style="white-space:pre-wrap">{{ a.cuerpo }}</pre>
+              <a class="pequeno" href="{{ a.enlace }}">Abrir el enlace</a></details></td></tr>
+        {% endfor %}
+      </table></div>
+    </details>
+  {% endif %}
+</section>
+
 {% if sin_actividad %}
 <section class="tarjeta">
   <h2>Clínicas a las que llamar</h2>

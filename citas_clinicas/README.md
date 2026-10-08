@@ -85,6 +85,30 @@ O regístrate tú como paciente en «Crear cuenta», o como clínica en «Regist
 Es el modelo de los restaurantes en ElTenedor/OpenTable: el local no entrega toda su
 agenda, solo un cupo de plazas por turno, y conserva el control del resto.
 
+**Recordatorio semanal** (para que los huecos no se queden viejos)
+- Cada viernes, las clínicas por franjas que aún no han publicado la semana siguiente
+  reciben un email: «¿Cuántos huecos tienes la semana del 12 al 18?», con su balance
+  de la semana (huecos publicados, solicitudes, pacientes nuevos).
+- El enlace abre, **sin contraseña** (enlace firmado, válido 10 días), la semana ya
+  rellena con el último valor publicado de cada día: si nada cambia, un toque en «Publicar».
+- Sin correo configurado, los avisos quedan en una bandeja de salida en `/admin`, con
+  botón «Avisar por WhatsApp» que abre el mensaje ya escrito (con el enlace).
+- `/admin` muestra quién no ha publicado, si abrió el enlace y si publicó; y permite
+  «Enviar recordatorios ahora». Cada clínica puede desactivarlo en su «Ficha».
+- Desde el jueves, el panel de la clínica también avisa si la semana que viene está vacía.
+
+Activar el envío automático de los viernes:
+1. En Render, variable `CITAS_TAREAS_CLAVE` con una clave larga inventada.
+2. En GitHub → Settings → Secrets and variables → Actions: secreto `CITAS_TAREAS_CLAVE`
+   (la misma clave) y variable `CITAS_URL` (la URL de Render).
+3. El workflow `.github/workflows/citacerca-recordatorio.yml` llama cada viernes a
+   `POST /tareas/recordatorios`. Ojo: GitHub solo ejecuta tareas programadas desde la
+   rama por defecto (`main`); mientras tanto se puede lanzar a mano con «Run workflow».
+   En la Raspberry, alternativa con cron: `python app.py --recordatorios`.
+4. Correo (opcional): `CITAS_SMTP_HOST`, `CITAS_SMTP_PUERTO` (587 o 465),
+   `CITAS_SMTP_USUARIO`, `CITAS_SMTP_CLAVE`, `CITAS_SMTP_REMITENTE`. Sirve cualquier
+   proveedor SMTP (Gmail con contraseña de aplicación, Brevo, etc.).
+
 **Mapa**
 - Búsqueda con mapa de las clínicas (chincheta del color de cada una, próximo hueco al tocarla).
 - «📍 Usar mi ubicación»: distancia real en metros/km y orden por cercanía de verdad.
@@ -131,7 +155,8 @@ HTTPS, un servidor WSGI (gunicorn) y revisar el RGPD (datos de salud).
 
 ## Siguientes pasos posibles
 
-- Avisos por email/SMS/WhatsApp al confirmar, y recordatorio el día anterior.
+- Avisos al paciente por email/WhatsApp al confirmar, y recordatorio el día anterior.
+- WhatsApp automático (API de WhatsApp Business) en lugar del botón manual.
 - Varios profesionales por clínica, cada uno con su agenda.
 - Geolocalización real (coordenadas por dirección) y mapa con las clínicas.
 - Lista de espera: avisar si se libera un hueco antes.

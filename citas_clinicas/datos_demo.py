@@ -141,8 +141,11 @@ def sembrar(ruta, borrar=False):
              c["tel"], c["web"], c["color"], c["caract"], c["hueco"], c["auto"], c["lat"], c["lon"],
              (ahora - timedelta(days=60)).isoformat(), c["modo"])).lastrowid
         # Huecos publicados por franja para las dos próximas semanas (días laborables).
-        for n in range(14):
-            dia = hoy + timedelta(days=n)
+        # Desde el lunes de esta semana. La clínica dental solo ha publicado esta semana:
+        # así aparece en el recordatorio semanal.
+        lunes = hoy - timedelta(days=hoy.weekday())
+        for n in range(21 if c["email"] != "dental@demo.es" else 7):
+            dia = lunes + timedelta(days=n)
             if c.get("cupos") and dia.weekday() < 5:
                 for franja, plazas in zip(("manana", "tarde"), c["cupos"][dia.weekday()]):
                     db.execute("INSERT INTO cupos (clinica_id, fecha, franja, plazas) VALUES (?, ?, ?, ?)",

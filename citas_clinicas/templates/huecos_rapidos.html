@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block titulo %}Huecos de la semana{% endblock %}
+{% block contenido %}
+<div class="contenedor estrecho" style="padding:0">
+  <div class="tarjeta" style="border-top:6px solid {{ c.color }}">
+    {% if publicado %}
+      <h1>¡Listo! ✅</h1>
+      <p>{{ c.nombre }} tiene publicados <b>{{ total }} huecos</b> la semana {{ rango }}. Los pacientes ya los ven.</p>
+      <p class="suave pequeno">Puedes cambiarlos cuando quieras desde tu panel o volviendo a abrir el enlace del email.</p>
+      <a class="boton" href="{{ url_for('clinica', cid=c.id) }}">Ver mi ficha</a>
+      <a class="boton secundario" href="{{ url_for('entrar', siguiente=url_for('panel')) }}">Ir a mi panel</a>
+    {% else %}
+      <h1>Semana {{ rango }}</h1>
+      <p class="suave">{{ c.nombre }} · ¿cuántas citas más podrías dar cada mañana y cada tarde?
+        Ya están puestos los números de esta semana: si no cambia nada, pulsa <b>Publicar</b>.</p>
+      <form method="post">{{ csrf() }}
+        <table class="rejilla-huecos">
+          <tr><th style="text-align:left">Día</th>{% for f, (nombre, _, _) in FRANJAS.items() %}<th>{{ nombre }}</th>{% endfor %}</tr>
+          {% for d, franjas in semana %}
+            <tr>
+              <td class="dia-celda"><b>{{ d|fecha_corta }}</b></td>
+              {% for f in FRANJAS %}{% set x = franjas[f] %}
+                <td>
+                  {% if x.abierto %}
+                    <input type="number" inputmode="numeric" name="{{ d.isoformat() }}_{{ f }}" min="0" max="50"
+                           value="{{ propuesta[(d.isoformat(), f)] }}" aria-label="{{ d|fecha_corta }} {{ FRANJAS[f][0] }}">
+                    <div class="pequeno suave">{{ x.horario }}</div>
+                  {% else %}<span class="suave pequeno">Cerrado</span>{% endif %}
+                </td>
+              {% endfor %}
+            </tr>
+          {% endfor %}
+        </table>
+        <button style="width:100%;margin-top:16px;font-size:1.1rem;padding:14px">Publicar</button>
+      </form>
+      <p class="ayuda" style="margin-top:12px">Pon 0 en lo que esté lleno. El horario de apertura y los festivos se cambian desde tu panel.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

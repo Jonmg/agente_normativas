@@ -1,0 +1,30 @@
+# Recordatorio semanal de CitaCerca (citas_clinicas/): cada viernes pide a las
+# clínicas que publiquen sus huecos de la semana siguiente.
+#
+# Configuración (Settings → Secrets and variables → Actions):
+#   - Variable CITAS_URL: la URL pública, p. ej. https://citacerca-demo.onrender.com
+#   - Secreto CITAS_TAREAS_CLAVE: la misma clave puesta en Render como CITAS_TAREAS_CLAVE
+# GitHub solo ejecuta los "schedule" desde la rama por defecto del repositorio.
+name: CitaCerca · recordatorio semanal
+
+on:
+  schedule:
+    - cron: "0 8 * * 5"  # viernes 08:00 UTC (10:00 en Madrid en verano, 09:00 en invierno)
+  workflow_dispatch:     # botón «Run workflow» para lanzarlo a mano
+
+jobs:
+  recordatorio:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Avisar a las clínicas
+        env:
+          URL: ${{ vars.CITAS_URL }}
+          CLAVE: ${{ secrets.CITAS_TAREAS_CLAVE }}
+        run: |
+          if [ -z "$URL" ] || [ -z "$CLAVE" ]; then
+            echo "Falta la variable CITAS_URL o el secreto CITAS_TAREAS_CLAVE: no se envía nada."
+            exit 0
+          fi
+          # El plan gratuito de Render se duerme: primero se despierta el servicio.
+          curl -fsS --retry 6 --retry-delay 15 --retry-all-errors -o /dev/null "$URL/"
+          curl -fsS --retry 2 --retry-delay 10 -X POST -H "Authorization: Bearer $CLAVE" "$URL/tareas/recordatorios"

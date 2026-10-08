@@ -12,19 +12,23 @@ Arranque:
 """
 
 import csv
+import hmac
 import io
 import math
+import smtplib
 import os
 import secrets
 import sqlite3
 import sys
 import unicodedata
 from datetime import date, datetime, timedelta
+from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
 
 from flask import (Flask, abort, flash, g, redirect, render_template, request,
                    send_from_directory, session, url_for)
+from itsdangerous import BadSignature, URLSafeTimedSerializer
 from markupsafe import Markup
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
@@ -154,7 +158,8 @@ CREATE TABLE IF NOT EXISTS clinicas (
     creado TEXT DEFAULT '',
     -- 'franjas': la clínica publica cuántos huecos tiene por mañana/tarde y confirma la hora.
     -- 'agenda': huecos exactos generados a partir del horario (permite confirmación automática).
-    modo TEXT DEFAULT 'franjas'
+    modo TEXT DEFAULT 'franjas',
+    recordatorio INTEGER DEFAULT 1  -- recibe el recordatorio semanal para publicar huecos
 );
 -- Huecos publicados por franja: «el lunes 12 por la mañana tengo 3».
 CREATE TABLE IF NOT EXISTS cupos (
@@ -238,6 +243,22 @@ CREATE TABLE IF NOT EXISTS eventos (
 );
 CREATE INDEX IF NOT EXISTS idx_citas_clinica_fecha ON citas(clinica_id, fecha);
 CREATE INDEX IF NOT EXISTS idx_eventos_clinica ON eventos(clinica_id, creado);
+-- Recordatorios enviados (o pendientes de enviar a mano) y si la clínica respondió.
+CREATE TABLE IF NOT EXISTS avisos (
+    id INTEGER PRIMARY KEY,
+    clinica_id INTEGER NOT NULL REFERENCES clinicas(id),
+    semana TEXT NOT NULL,          -- lunes de la semana por la que se pregunta
+    canal TEXT NOT NULL,           -- 'email' o 'bandeja' (sin correo configurado)
+    destino TEXT DEFAULT '',
+    asunto TEXT DEFAULT '',
+    cuerpo TEXT DEFAULT '',
+    enlace TEXT DEFAULT '',
+    estado TEXT NOT NULL,          -- 'enviado', 'en_bandeja' o 'error'
+    error TEXT DEFAULT '',
+    abierto TEXT DEFAULT '',
+    publicado TEXT DEFAULT '',
+    creado TEXT NOT NULL
+);
 """
 
 # --------------------------------------------------------------------------
@@ -404,7 +425,8 @@ def migrar(db):
         """)
         db.execute("PRAGMA foreign_keys = ON")
     nuevas = {"clinicas": [("lat", "REAL"), ("lon", "REAL"), ("tarifa", "REAL"), ("tope_mensual", "REAL"),
-                           ("creado", "TEXT DEFAULT ''"), ("modo", "TEXT DEFAULT 'agenda'")],
+                           ("creado", "TEXT DEFAULT ''"), ("modo", "TEXT DEFAULT 'agenda'"),
+                           ("recordatorio", "INTEGER DEFAULT 1")],
               "citas": [("ya_paciente", "INTEGER DEFAULT 0"), ("franja", "TEXT DEFAULT ''"),
                         ("preferencia", "TEXT DEFAULT ''")]}
     for tabla, columnas in nuevas.items():
@@ -738,6 +760,173 @@ def asegurar_admin(ruta, email, clave):
 
 
 # --------------------------------------------------------------------------
+# Recordatorio semanal
+# --------------------------------------------------------------------------
+#
+# Cada viernes se pregunta a las clínicas por franjas cuántos huecos tienen la
+# semana siguiente. El enlace lleva un token firmado (sin contraseña) a una
+# página con la semana ya rellena con lo de esta semana: si no cambia nada,
+# basta con pulsar «Publicar». Sin SMTP configurado, el aviso queda en la
+# bandeja de salida del panel de administración para enviarlo a mano.
+
+VALIDEZ_ENLACE = 10 * 24 * 3600  # segundos
+
+
+def lunes_siguiente(dia):
+    return dia + timedelta(days=7 - dia.weekday())
+
+
+def firmante():
+    return URLSafeTimedSerializer(app_actual().config["SECRET_KEY"], salt="huecos-rapidos")
+
+
+def token_huecos(clinica_id, lunes):
+    return firmante().dumps({"c": clinica_id, "s": lunes.isoformat()})
+
+
+def leer_token_huecos(token):
+    """(clinica_id, lunes) o None si el enlace es falso o ha caducado."""
+    try:
+        datos = firmante().loads(token, max_age=VALIDEZ_ENLACE)
+        return int(datos["c"]), date.fromisoformat(datos["s"])
+    except (BadSignature, KeyError, TypeError, ValueError):
+        return None
+
+
+def propuesta_semana(db, clinica, lunes):
+    """Huecos para la semana que empieza en `lunes`.
+
+    Lo ya publicado para esa semana; si no hay, el último valor publicado ese
+    mismo día de la semana y franja en las 4 semanas anteriores; si no, 0.
+    """
+    propuesta, ultimo = {}, {}
+    for r in db.execute("SELECT * FROM cupos WHERE clinica_id = ? AND fecha >= ? AND fecha < ? ORDER BY fecha",
+                        (clinica["id"], (lunes - timedelta(days=28)).isoformat(),
+                         (lunes + timedelta(days=7)).isoformat())):
+        dia = date.fromisoformat(r["fecha"])
+        if dia >= lunes:
+            propuesta[(r["fecha"], r["franja"])] = r["plazas"]
+        else:
+            ultimo[(dia.weekday(), r["franja"])] = r["plazas"]  # en orden: se queda el más reciente
+    for n in range(7):
+        dia = lunes + timedelta(days=n)
+        for f in FRANJAS:
+            propuesta.setdefault((dia.isoformat(), f), ultimo.get((dia.weekday(), f), 0))
+    return propuesta
+
+
+def semana_publicada(db, clinica_id, lunes):
+    return db.execute("SELECT COALESCE(SUM(plazas), 0) FROM cupos WHERE clinica_id = ? AND fecha >= ? AND fecha < ?",
+                      (clinica_id, lunes.isoformat(), (lunes + timedelta(days=7)).isoformat())).fetchone()[0] > 0
+
+
+def url_base():
+    return (os.environ.get("CITAS_URL_BASE") or os.environ.get("RENDER_EXTERNAL_URL")
+            or request.url_root).rstrip("/")
+
+
+def smtp_configurado():
+    return bool(os.environ.get("CITAS_SMTP_HOST"))
+
+
+def enviar_email(destino, asunto, texto, html):
+    msg = EmailMessage()
+    msg["Subject"] = asunto
+    msg["From"] = os.environ.get("CITAS_SMTP_REMITENTE") or os.environ.get("CITAS_SMTP_USUARIO", "")
+    msg["To"] = destino
+    msg.set_content(texto)
+    msg.add_alternative(html, subtype="html")
+    puerto = int(os.environ.get("CITAS_SMTP_PUERTO", "587"))
+    clase = smtplib.SMTP_SSL if puerto == 465 else smtplib.SMTP
+    with clase(os.environ["CITAS_SMTP_HOST"], puerto, timeout=20) as smtp:
+        if puerto != 465:
+            smtp.starttls()
+        if os.environ.get("CITAS_SMTP_USUARIO"):
+            smtp.login(os.environ["CITAS_SMTP_USUARIO"], os.environ.get("CITAS_SMTP_CLAVE", ""))
+        smtp.send_message(msg)
+
+
+def rango_semana(lunes):
+    domingo = lunes + timedelta(days=6)
+    if lunes.month == domingo.month:
+        return f"del {lunes.day} al {domingo.day} de {MESES_LARGOS[lunes.month - 1]}"
+    return f"del {lunes.day} de {MESES_LARGOS[lunes.month - 1]} al {domingo.day} de {MESES_LARGOS[domingo.month - 1]}"
+
+
+def componer_recordatorio(db, clinica, responsable, lunes, enlace):
+    hoy = ahora().date()
+    resumen = resumen_clinica(db, clinica, hoy - timedelta(days=7), hoy + timedelta(days=1))
+    publicados = db.execute("SELECT COALESCE(SUM(plazas), 0) FROM cupos WHERE clinica_id = ? AND fecha >= ? "
+                            "AND fecha < ?", (clinica["id"], (lunes - timedelta(days=7)).isoformat(),
+                                              lunes.isoformat())).fetchone()[0]
+    palabras_nombre = [p for p in (responsable["nombre"] or "").split()
+                       if normalizar(p).rstrip(".") not in ("dr", "dra", "sr", "sra", "don", "dona")]
+    nombre = palabras_nombre[0] if palabras_nombre else clinica["nombre"]
+    asunto = f"¿Cuántos huecos tienes la semana {rango_semana(lunes)}?"
+    n_sol, n_nuevos = resumen["solicitudes"], resumen["nuevos"]
+    balance = (f"Esta semana publicaste {publicados} huecos y recibiste {n_sol} "
+               f"solicitud{'es' if n_sol != 1 else ''} de cita")
+    if n_nuevos:
+        balance += f", {n_nuevos} de pacientes nuevos" if n_nuevos > 1 else ", 1 de un paciente nuevo"
+    balance += "."
+    texto = (f"Hola {nombre}:\n\n"
+             f"¿Cuántos huecos libres tiene {clinica['nombre']} la semana {rango_semana(lunes)}?\n\n"
+             f"{balance}\n\n"
+             f"Publícalos en 30 segundos, sin contraseña:\n{enlace}\n\n"
+             "Ya están rellenos con los de esta semana: si no cambia nada, solo tienes que pulsar «Publicar».\n"
+             "Si no publicas, tu ficha aparecerá sin huecos esa semana.\n\n"
+             "— CitaCerca\n"
+             "Para dejar de recibir este aviso: Mi clínica → Ficha → Recordatorio semanal.")
+    html = render_template("email_recordatorio.html", nombre=nombre, c=clinica, rango=rango_semana(lunes),
+                           balance=balance, enlace=enlace)
+    return asunto, texto, html
+
+
+def enviar_recordatorios(db, forzar=False):
+    """Envía el recordatorio de la semana que viene. Necesita contexto de petición (para las URL).
+
+    Devuelve [(clinica, resultado)] con resultado: enviado, en_bandeja, error, ya_publicado o ya_avisado.
+    """
+    lunes = lunes_siguiente(ahora().date())
+    resultados = []
+    for c in db.execute("SELECT * FROM clinicas WHERE activa = 1 AND modo = 'franjas' AND recordatorio = 1 "
+                        "ORDER BY nombre").fetchall():
+        if semana_publicada(db, c["id"], lunes):
+            resultados.append((c, "ya_publicado"))
+            continue
+        if not forzar and db.execute("SELECT 1 FROM avisos WHERE clinica_id = ? AND semana = ? AND estado != 'error'",
+                                     (c["id"], lunes.isoformat())).fetchone():
+            resultados.append((c, "ya_avisado"))
+            continue
+        responsable = db.execute("SELECT * FROM usuarios WHERE id = ?", (c["usuario_id"],)).fetchone()
+        enlace = url_base() + url_for("huecos_rapidos", token=token_huecos(c["id"], lunes))
+        asunto, texto, html = componer_recordatorio(db, c, responsable, lunes, enlace)
+        canal, estado, error = "bandeja", "en_bandeja", ""
+        if smtp_configurado() and responsable["email"]:
+            canal = "email"
+            try:
+                enviar_email(responsable["email"], asunto, texto, html)
+                estado = "enviado"
+            except (OSError, smtplib.SMTPException) as e:
+                estado, error = "error", str(e)[:300]
+        db.execute("INSERT INTO avisos (clinica_id, semana, canal, destino, asunto, cuerpo, enlace, estado, error, "
+                   "creado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                   (c["id"], lunes.isoformat(), canal, responsable["email"], asunto, texto, enlace, estado, error,
+                    ahora().isoformat()))
+        db.commit()
+        resultados.append((c, estado))
+    return resultados
+
+
+def enlace_whatsapp(telefono, texto):
+    numero = "".join(ch for ch in telefono or "" if ch.isdigit())
+    if len(numero) == 9:  # número español sin prefijo
+        numero = "34" + numero
+    from urllib.parse import quote
+    return f"https://wa.me/{numero}?text={quote(texto)}" if numero else ""
+
+
+# --------------------------------------------------------------------------
 # Aplicación
 # --------------------------------------------------------------------------
 
@@ -789,7 +978,7 @@ def crear_app(config=None):
             g.usuario = una("SELECT * FROM usuarios WHERE id = ?", session["uid"])
             if g.usuario and g.usuario["rol"] == "clinica":
                 g.clinica = una("SELECT * FROM clinicas WHERE usuario_id = ?", g.usuario["id"])
-        if request.method == "POST" and app.config["CSRF"]:
+        if request.method == "POST" and app.config["CSRF"] and request.endpoint != "tarea_recordatorios":
             if not session.get("csrf") or request.form.get("_csrf") != session["csrf"]:
                 abort(400, "Formulario caducado. Vuelve atrás y recarga la página.")
 
@@ -1257,6 +1446,9 @@ def registrar_rutas(app):
         faltan = []
         if g.clinica["modo"] == "franjas" and not libres:
             faltan.append(("Publica tus huecos de esta semana", url_for("panel_huecos")))
+        elif (g.clinica["modo"] == "franjas" and hoy.weekday() >= 3
+              and not semana_publicada(get_db(), cid, lunes_siguiente(hoy))):
+            faltan.append(("Publica tus huecos de la semana que viene", url_for("panel_huecos")))
         if not una("SELECT 1 FROM servicios WHERE clinica_id = ?", cid):
             faltan.append(("Añade al menos un servicio", url_for("panel_servicios")))
         if not g.clinica["descripcion"]:
@@ -1342,12 +1534,13 @@ def registrar_rutas(app):
             db.execute(
                 "UPDATE clinicas SET nombre=?, tipo=?, eslogan=?, descripcion=?, direccion=?, ciudad=?, "
                 "codigo_postal=?, telefono=?, web=?, foto=?, color=?, caracteristicas=?, duracion_hueco=?, "
-                "confirmacion_automatica=?, activa=?, lat=?, lon=?, modo=? WHERE id=?",
+                "confirmacion_automatica=?, activa=?, lat=?, lon=?, modo=?, recordatorio=? WHERE id=?",
                 (nombre, tipo, campo("eslogan", 140), campo("descripcion", 3000), campo("direccion", 200),
                  campo("ciudad", 80), cp, campo("telefono", 30), campo("web", 200), foto, color, caract,
                  duracion, 1 if request.form.get("confirmacion_automatica") else 0,
                  1 if request.form.get("activa") else 0, lat, lon,
-                 request.form.get("modo") if request.form.get("modo") in MODOS else c["modo"], c["id"]))
+                 request.form.get("modo") if request.form.get("modo") in MODOS else c["modo"],
+                 1 if request.form.get("recordatorio") else 0, c["id"]))
             db.commit()
             flash("Ficha guardada.", "ok")
             return redirect(url_for("panel_perfil"))
@@ -1529,9 +1722,90 @@ def registrar_rutas(app):
                                                       "facturables", "importe")},
         }
         sin_actividad = [f for f in filas if f["clinica"]["activa"] and not f["vistas"] and not f["solicitudes"]]
+        lunes = lunes_siguiente(ahora().date())
+        pendientes_semana = []
+        for c in db.execute("SELECT * FROM clinicas WHERE activa = 1 AND modo = 'franjas' ORDER BY nombre"):
+            if semana_publicada(db, c["id"], lunes):
+                continue
+            aviso = db.execute("SELECT * FROM avisos WHERE clinica_id = ? AND semana = ? ORDER BY id DESC LIMIT 1",
+                               (c["id"], lunes.isoformat())).fetchone()
+            enlace = url_base() + url_for("huecos_rapidos", token=token_huecos(c["id"], lunes))
+            texto = (f"Hola, soy de CitaCerca. ¿Cuántos huecos tiene {c['nombre']} la semana "
+                     f"{rango_semana(lunes)}? Se publican en 30 segundos aquí: {enlace}")
+            pendientes_semana.append({"clinica": c, "aviso": aviso, "whatsapp": enlace_whatsapp(c["telefono"], texto)})
+        avisos = db.execute("SELECT a.*, c.nombre clinica FROM avisos a JOIN clinicas c ON c.id = a.clinica_id "
+                            "ORDER BY a.id DESC LIMIT 15").fetchall()
         return render_template("admin.html", filas=filas, totales=totales, mes=desde.strftime("%Y-%m"),
                                meses=meses_disponibles(), titulo_mes=f"{MESES_LARGOS[desde.month - 1]} {desde.year}",
-                               tarifa_general=TARIFA_POR_DEFECTO, sin_actividad=sin_actividad)
+                               tarifa_general=TARIFA_POR_DEFECTO, sin_actividad=sin_actividad,
+                               semana_siguiente=rango_semana(lunes), pendientes_semana=pendientes_semana,
+                               avisos=avisos, smtp=smtp_configurado())
+
+    @app.route("/admin/recordatorios", methods=["POST"])
+    @requiere("admin")
+    def admin_recordatorios():
+        resultados = enviar_recordatorios(get_db(), forzar=bool(request.form.get("forzar")))
+        cuenta = {}
+        for _, r in resultados:
+            cuenta[r] = cuenta.get(r, 0) + 1
+        textos = {"enviado": "enviados por email", "en_bandeja": "en la bandeja de salida",
+                  "error": "con error", "ya_publicado": "ya habían publicado", "ya_avisado": "ya avisadas"}
+        flash("Recordatorios: " + (", ".join(f"{n} {textos[k]}" for k, n in cuenta.items())
+                                   or "ninguna clínica por franjas activa") + ".", "ok")
+        return redirect(url_for("admin") + "#recordatorios")
+
+    @app.route("/tareas/recordatorios", methods=["POST"])
+    def tarea_recordatorios():
+        """Para un cron externo (GitHub Actions): Authorization: Bearer <CITAS_TAREAS_CLAVE>."""
+        clave = os.environ.get("CITAS_TAREAS_CLAVE", "")
+        if not clave:
+            abort(404)
+        recibida = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        if not hmac.compare_digest(recibida, clave):
+            abort(403)
+        resultados = enviar_recordatorios(get_db())
+        return {"semana": lunes_siguiente(ahora().date()).isoformat(),
+                "resultados": [{"clinica": c["nombre"], "resultado": r} for c, r in resultados]}
+
+    @app.route("/huecos-rapidos/<token>", methods=["GET", "POST"])
+    def huecos_rapidos(token):
+        """Página del enlace del recordatorio: publicar la semana sin entrar con contraseña."""
+        leido = leer_token_huecos(token)
+        if not leido:
+            return render_template("error.html", titulo="Enlace caducado",
+                                   texto="Este enlace ya no es válido. Entra en tu panel para publicar tus huecos."), 400
+        cid, lunes = leido
+        db = get_db()
+        c = una("SELECT * FROM clinicas WHERE id = ?", cid)
+        if not c:
+            abort(404)
+        if request.method == "POST":
+            for n in range(7):
+                dia = (lunes + timedelta(days=n)).isoformat()
+                for f in FRANJAS:
+                    valor = request.form.get(f"{dia}_{f}")
+                    if valor is None:
+                        continue
+                    try:
+                        plazas = max(0, min(int(valor or 0), 50))
+                    except ValueError:
+                        continue
+                    db.execute("INSERT INTO cupos (clinica_id, fecha, franja, plazas) VALUES (?, ?, ?, ?) "
+                               "ON CONFLICT (clinica_id, fecha, franja) DO UPDATE SET plazas = excluded.plazas",
+                               (cid, dia, f, plazas))
+            db.execute("UPDATE avisos SET publicado = ? WHERE clinica_id = ? AND semana = ? AND publicado = ''",
+                       (ahora().isoformat(), cid, lunes.isoformat()))
+            db.commit()
+            total = db.execute("SELECT COALESCE(SUM(plazas), 0) FROM cupos WHERE clinica_id = ? AND fecha >= ? "
+                               "AND fecha < ?", (cid, lunes.isoformat(),
+                                                 (lunes + timedelta(days=7)).isoformat())).fetchone()[0]
+            return render_template("huecos_rapidos.html", c=c, publicado=True, total=total,
+                                   rango=rango_semana(lunes))
+        db.execute("UPDATE avisos SET abierto = ? WHERE clinica_id = ? AND semana = ? AND abierto = ''",
+                   (ahora().isoformat(), cid, lunes.isoformat()))
+        db.commit()
+        return render_template("huecos_rapidos.html", c=c, publicado=False, rango=rango_semana(lunes),
+                               semana=cupos_libres(db, c, lunes, 7), propuesta=propuesta_semana(db, c, lunes))
 
     @app.route("/admin/clinica/<int:cid>", methods=["GET", "POST"])
     @requiere("admin")
@@ -1607,5 +1881,12 @@ if __name__ == "__main__":
         sembrar(ruta, borrar=True)
         print("Base de datos de demostración creada. Cuentas en README.md (clave: demo1234).")
     app = crear_app()
+    if "--recordatorios" in sys.argv:
+        # Para cron en la propia máquina (p. ej. la Raspberry): python app.py --recordatorios
+        base = os.environ.get("CITAS_URL_BASE", "http://127.0.0.1:5000")
+        with app.test_request_context(base_url=base):
+            for clinica, resultado in enviar_recordatorios(get_db()):
+                print(f"{clinica['nombre']}: {resultado}")
+        sys.exit(0)
     app.run(host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", 5000)),
             debug=os.environ.get("DEBUG") == "1")
