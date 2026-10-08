@@ -26,6 +26,7 @@ CLINICAS = [
         "direccion": "Calle de Fuencarral 112", "ciudad": "Madrid", "cp": "28010", "tel": "910000101",
         "lat": 40.4316, "lon": -3.7022,
         "web": "", "caract": "accesible,tarjeta,seguros", "hueco": 15, "auto": 0,
+        "modo": "franjas", "cupos": [(3, 2), (2, 1), (4, 2), (1, 3), (3, 0)],  # (mañana, tarde) de lunes a viernes
         "horario": {d: [("09:00", "14:00"), ("16:00", "20:00")] for d in range(5)},
         "servicios": [
             ("Quiropodia (durezas, callos y uñas)", 30, 35, "Limpieza completa del pie."),
@@ -44,7 +45,7 @@ CLINICAS = [
                        "linfático y masaje deportivo antes o después de competir. Confirmamos al instante.",
         "direccion": "Calle de Alcalá 45", "ciudad": "Madrid", "cp": "28014", "tel": "910000202",
         "lat": 40.4189, "lon": -3.6968,
-        "web": "", "caract": "domicilio,tarjeta,ingles", "hueco": 30, "auto": 1,
+        "web": "", "caract": "domicilio,tarjeta,ingles", "hueco": 30, "auto": 1, "modo": "agenda",
         "horario": {**{d: [("10:00", "14:00"), ("16:00", "21:00")] for d in range(5)}, 5: [("10:00", "14:00")]},
         "servicios": [
             ("Masaje descontracturante de espalda", 60, 45, "Espalda, cervicales y hombros."),
@@ -63,6 +64,7 @@ CLINICAS = [
         "direccion": "Paseo de la Castellana 210", "ciudad": "Madrid", "cp": "28046", "tel": "910000303",
         "lat": 40.4639, "lon": -3.6898,
         "web": "", "caract": "accesible,parking,seguros,infantil,urgencias,tarjeta", "hueco": 30, "auto": 0,
+        "modo": "franjas", "cupos": [(2, 3), (3, 2), (1, 1), (2, 2), (4, 0)],
         "horario": {d: [("09:00", "14:00"), ("15:30", "20:30")] for d in range(5)},
         "servicios": [
             ("Revisión y diagnóstico", 30, 0, "Primera visita gratuita con radiografía."),
@@ -83,7 +85,7 @@ CLINICAS = [
                        "en cadena.",
         "direccion": "Calle Madrid 30", "ciudad": "Getafe", "cp": "28901", "tel": "910000404",
         "lat": 40.3082, "lon": -3.7318,
-        "web": "", "caract": "accesible,parking,seguros,ingles", "hueco": 15, "auto": 0,
+        "web": "", "caract": "accesible,parking,seguros,ingles", "hueco": 15, "auto": 0, "modo": "agenda",
         "horario": {**{d: [("08:00", "14:00"), ("16:00", "21:00")] for d in range(5)}, 5: [("09:00", "13:00")]},
         "servicios": [
             ("Sesión de fisioterapia", 45, 40, "Valoración y tratamiento manual."),
@@ -134,10 +136,17 @@ def sembrar(ruta, borrar=False):
         cid = db.execute(
             "INSERT INTO clinicas (usuario_id, nombre, tipo, eslogan, descripcion, direccion, ciudad, "
             "codigo_postal, telefono, web, color, caracteristicas, duracion_hueco, confirmacion_automatica, "
-            "lat, lon, creado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "lat, lon, creado, modo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (uid, c["nombre"], c["tipo"], c["eslogan"], c["descripcion"], c["direccion"], c["ciudad"], c["cp"],
              c["tel"], c["web"], c["color"], c["caract"], c["hueco"], c["auto"], c["lat"], c["lon"],
-             (ahora - timedelta(days=60)).isoformat())).lastrowid
+             (ahora - timedelta(days=60)).isoformat(), c["modo"])).lastrowid
+        # Huecos publicados por franja para las dos próximas semanas (días laborables).
+        for n in range(14):
+            dia = hoy + timedelta(days=n)
+            if c.get("cupos") and dia.weekday() < 5:
+                for franja, plazas in zip(("manana", "tarde"), c["cupos"][dia.weekday()]):
+                    db.execute("INSERT INTO cupos (clinica_id, fecha, franja, plazas) VALUES (?, ?, ?, ?)",
+                               (cid, dia.isoformat(), franja, plazas))
         for dia, tramos in c["horario"].items():
             for ini, fin in tramos:
                 db.execute("INSERT INTO horarios (clinica_id, dia_semana, inicio, fin) VALUES (?, ?, ?, ?)",
@@ -150,12 +159,15 @@ def sembrar(ruta, borrar=False):
     ana = usuario(PACIENTE["email"], "paciente", PACIENTE["nombre"], PACIENTE["tel"], PACIENTE["cp"])
     otros = [usuario(e, "paciente", n, t, cp) for e, n, t, cp in OTROS]
 
-    def cita(cid, pid, sid, dia, hora, estado, mensaje="", respuesta="", visto=1):
+    def cita(cid, pid, sid, dia, hora, estado, mensaje="", respuesta="", visto=1, franja="", preferencia=""):
+        """Con hora: cita de agenda exacta. Sin hora: solicitud por franja pendiente de hora."""
+        franja = franja or ("manana" if hora < "14:00" else "tarde")
         dur = db.execute("SELECT duracion FROM servicios WHERE id = ?", (sid,)).fetchone()[0]
         return db.execute(
             "INSERT INTO citas (clinica_id, paciente_id, servicio_id, fecha, hora, duracion, estado, "
-            "mensaje_paciente, respuesta_clinica, visto_paciente, creado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (cid, pid, sid, dia.isoformat(), hora, dur, estado, mensaje, respuesta, visto,
+            "mensaje_paciente, respuesta_clinica, visto_paciente, franja, preferencia, creado) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (cid, pid, sid, dia.isoformat(), hora, dur, estado, mensaje, respuesta, visto, franja, preferencia,
              (ahora - timedelta(days=1)).isoformat())).lastrowid
 
     (pod, pod_s, _), (mas, mas_s, _), (den, den_s, _), (fis, fis_s, _) = clinicas
@@ -164,7 +176,8 @@ def sembrar(ruta, borrar=False):
     # Ana: una cita confirmada, una pendiente y una pasada para poder valorarla.
     cita(den, ana, den_s[1], d2, "10:00", "confirmada", "Hace un año de la última limpieza.",
          "¡Perfecto, te esperamos!", visto=0)
-    cita(pod, ana, pod_s[1], d3, "17:00", "pendiente", "Me duele bastante el dedo gordo del pie derecho.")
+    cita(pod, ana, pod_s[1], d3, "", "pendiente", "Me duele bastante el dedo gordo del pie derecho.",
+         franja="tarde", preferencia="17:00")
     pasada = cita(fis, ana, fis_s[0], hoy - timedelta(days=9), "18:00", "completada")
     db.execute("INSERT INTO valoraciones (cita_id, clinica_id, paciente_id, puntuacion, comentario, creado) "
                "VALUES (?, ?, ?, 5, 'Me quitaron el dolor lumbar en dos sesiones.', ?)",
@@ -173,12 +186,13 @@ def sembrar(ruta, borrar=False):
 
     # Ocupación y solicitudes de otros pacientes.
     lucia, pablo, marta = otros
-    cita(pod, lucia, pod_s[0], d1, "09:00", "pendiente", "¿Atendéis a personas con diabetes?")
+    cita(pod, lucia, pod_s[0], d1, "", "pendiente", "¿Atendéis a personas con diabetes?", franja="manana")
     cita(pod, pablo, pod_s[2], d1, "10:00", "confirmada")
     cita(pod, marta, pod_s[0], d2, "16:30", "confirmada")
     cita(mas, lucia, mas_s[1], d1, "18:00", "confirmada")
     cita(mas, pablo, mas_s[0], d2, "17:00", "confirmada")
-    cita(den, marta, den_s[3], d1, "09:30", "pendiente", "Me duele una muela desde ayer, ¿podéis antes?")
+    cita(den, marta, den_s[3], d1, "", "pendiente", "Me duele una muela desde ayer, ¿podéis antes?",
+         franja="manana", preferencia="09:00")
     cita(den, lucia, den_s[0], d1, "11:00", "confirmada")
     cita(fis, pablo, fis_s[2], d1, "08:00", "confirmada")
     cita(fis, lucia, fis_s[3], d2, "18:00", "pendiente", "Es por posparto, 4 meses.")

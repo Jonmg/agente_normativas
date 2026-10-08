@@ -82,6 +82,13 @@ ESTADOS_CITA = {
 }
 ESTADOS_OCUPAN = ("pendiente", "confirmada")
 
+# Mañana hasta las 14:00, tarde desde las 14:00. Basta para lo que publica una clínica pequeña.
+FRANJAS = {"manana": ("Mañana", 0, 14 * 60), "tarde": ("Tarde", 14 * 60, 24 * 60)}
+MODOS = {
+    "franjas": "Huecos por franja: digo cuántos tengo cada mañana y tarde y confirmo la hora",
+    "agenda": "Agenda exacta: se ofrecen las horas libres según mi horario",
+}
+
 DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 DIAS_CORTOS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
 MESES_LARGOS = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre",
@@ -144,7 +151,19 @@ CREATE TABLE IF NOT EXISTS clinicas (
     lon REAL,
     tarifa REAL,             -- € por paciente nuevo; NULL = tarifa general
     tope_mensual REAL,       -- máximo a facturar al mes; NULL = sin tope
-    creado TEXT DEFAULT ''
+    creado TEXT DEFAULT '',
+    -- 'franjas': la clínica publica cuántos huecos tiene por mañana/tarde y confirma la hora.
+    -- 'agenda': huecos exactos generados a partir del horario (permite confirmación automática).
+    modo TEXT DEFAULT 'franjas'
+);
+-- Huecos publicados por franja: «el lunes 12 por la mañana tengo 3».
+CREATE TABLE IF NOT EXISTS cupos (
+    id INTEGER PRIMARY KEY,
+    clinica_id INTEGER NOT NULL REFERENCES clinicas(id),
+    fecha TEXT NOT NULL,
+    franja TEXT NOT NULL CHECK (franja IN ('manana', 'tarde')),
+    plazas INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (clinica_id, fecha, franja)
 );
 CREATE TABLE IF NOT EXISTS servicios (
     id INTEGER PRIMARY KEY,
@@ -182,6 +201,8 @@ CREATE TABLE IF NOT EXISTS citas (
     respuesta_clinica TEXT DEFAULT '',
     llamar_antes INTEGER DEFAULT 0,
     ya_paciente INTEGER DEFAULT 0,  -- la clínica indica que ya era paciente suyo: no se factura
+    franja TEXT DEFAULT '',         -- 'manana' / 'tarde'; en modo franjas la hora queda '' hasta confirmar
+    preferencia TEXT DEFAULT '',    -- hora aproximada que prefiere el paciente
     visto_paciente INTEGER DEFAULT 1,
     creado TEXT NOT NULL
 );
@@ -256,6 +277,16 @@ def fecha_bonita(valor):
 def fecha_corta(valor):
     d = valor if isinstance(valor, date) else date.fromisoformat(valor)
     return f"{DIAS_CORTOS[d.weekday()]} {d.day}"
+
+
+def cuando(cita):
+    """«Lunes 12 oct · 10:00», o la franja si la clínica aún no ha fijado la hora."""
+    if cita["hora"]:
+        return f"{fecha_bonita(cita['fecha'])} · {cita['hora']}"
+    texto = f"{fecha_bonita(cita['fecha'])} · {FRANJAS[cita['franja']][0].lower()}"
+    if cita["preferencia"]:
+        texto += f" (prefiere hacia las {cita['preferencia']})"
+    return texto
 
 
 def cp_valido(cp):
@@ -373,8 +404,9 @@ def migrar(db):
         """)
         db.execute("PRAGMA foreign_keys = ON")
     nuevas = {"clinicas": [("lat", "REAL"), ("lon", "REAL"), ("tarifa", "REAL"), ("tope_mensual", "REAL"),
-                           ("creado", "TEXT DEFAULT ''")],
-              "citas": [("ya_paciente", "INTEGER DEFAULT 0")]}
+                           ("creado", "TEXT DEFAULT ''"), ("modo", "TEXT DEFAULT 'agenda'")],
+              "citas": [("ya_paciente", "INTEGER DEFAULT 0"), ("franja", "TEXT DEFAULT ''"),
+                        ("preferencia", "TEXT DEFAULT ''")]}
     for tabla, columnas in nuevas.items():
         if tabla not in tablas:
             continue
@@ -422,6 +454,8 @@ def huecos_libres(db, clinica, duracion=None, desde=None, dias=7):
         f"AND estado IN ({','.join('?' * len(ESTADOS_OCUPAN))})",
         (clinica["id"], inicio.isoformat(), fin.isoformat(), *ESTADOS_OCUPAN))
     for c in citas:
+        if not c["hora"]:  # solicitud por franja aún sin hora: no ocupa una hora concreta
+            continue
         ini = a_minutos(c["hora"])
         ocupado.setdefault(c["fecha"], []).append((ini, ini + c["duracion"]))
     for b in db.execute("SELECT * FROM bloqueos WHERE clinica_id = ? AND fecha >= ? AND fecha < ?",
@@ -450,6 +484,87 @@ def huecos_libres(db, clinica, duracion=None, desde=None, dias=7):
                 t += paso
         resultado.append((dia, horas))
     return resultado
+
+
+def franja_de(hora):
+    return "manana" if a_minutos(hora) < FRANJAS["tarde"][1] else "tarde"
+
+
+def tramos_franja(tramos, franja):
+    """Parte del horario de un día que cae en la franja: [(inicio, fin)] en minutos."""
+    _, ini, fin = FRANJAS[franja]
+    return [(max(a, ini), min(b, fin)) for a, b in tramos if min(b, fin) > max(a, ini)]
+
+
+def cupos_libres(db, clinica, desde=None, dias=7):
+    """Huecos publicados por franja menos las solicitudes que ya los ocupan.
+
+    Devuelve [(fecha, {franja: {"libres", "plazas", "abierto", "horario"}})].
+    Una franja de hoy deja de ofrecerse cuando falta menos de MARGEN_MIN para su cierre.
+    """
+    momento = ahora()
+    inicio = desde or momento.date()
+    fin = inicio + timedelta(days=dias)
+    horario = {}
+    for h in db.execute("SELECT * FROM horarios WHERE clinica_id = ? ORDER BY inicio", (clinica["id"],)):
+        horario.setdefault(h["dia_semana"], []).append((a_minutos(h["inicio"]), a_minutos(h["fin"])))
+    plazas = {(r["fecha"], r["franja"]): r["plazas"] for r in db.execute(
+        "SELECT * FROM cupos WHERE clinica_id = ? AND fecha >= ? AND fecha < ?",
+        (clinica["id"], inicio.isoformat(), fin.isoformat()))}
+    pedidas = {(r[0], r[1]): r[2] for r in db.execute(
+        "SELECT fecha, franja, COUNT(*) FROM citas WHERE clinica_id = ? AND fecha >= ? AND fecha < ? "
+        f"AND franja != '' AND estado IN ({','.join('?' * len(ESTADOS_OCUPAN))}) GROUP BY fecha, franja",
+        (clinica["id"], inicio.isoformat(), fin.isoformat(), *ESTADOS_OCUPAN))}
+    cerrados = {r[0] for r in db.execute(
+        "SELECT fecha FROM bloqueos WHERE clinica_id = ? AND inicio IS NULL AND fecha >= ? AND fecha < ?",
+        (clinica["id"], inicio.isoformat(), fin.isoformat()))}
+    resultado = []
+    for n in range(dias):
+        dia = inicio + timedelta(days=n)
+        clave = dia.isoformat()
+        franjas = {}
+        for f in FRANJAS:
+            tramos = tramos_franja(horario.get(dia.weekday(), []), f)
+            abierto = bool(tramos) and clave not in cerrados and dia >= momento.date()
+            if abierto and dia == momento.date():
+                abierto = momento.hour * 60 + momento.minute + MARGEN_MIN < tramos[-1][1]
+            total = plazas.get((clave, f), 0)
+            ocupadas = pedidas.get((clave, f), 0)
+            franjas[f] = {
+                "plazas": total, "ocupadas": ocupadas, "abierto": abierto,
+                "libres": max(total - ocupadas, 0) if abierto else 0,
+                "horario": ", ".join(f"{a_hhmm(a)}–{a_hhmm(b)}" for a, b in tramos),
+                "horas": [a_hhmm(m) for a, b in tramos for m in range(a, b, 60)],
+            }
+        resultado.append((dia, franjas))
+    return resultado
+
+
+def disponibilidad(db, clinica, duracion=None, franja="", desde=None, dias=7):
+    """Lo que se ofrece al paciente, sea cual sea el modo de la clínica.
+
+    Lista de {"dia", "hora" | None, "franja", "plazas", "texto"} ordenada en el tiempo.
+    """
+    ofertas = []
+    if clinica["modo"] == "franjas":
+        for dia, franjas in cupos_libres(db, clinica, desde, dias):
+            for f, datos in franjas.items():
+                if datos["libres"] and (not franja or franja == f):
+                    ofertas.append({"dia": dia, "hora": None, "franja": f, "plazas": datos["libres"],
+                                    "texto": f"{fecha_corta(dia)} · {FRANJAS[f][0].lower()} ({datos['libres']})"})
+    else:
+        for dia, horas in huecos_libres(db, clinica, duracion, desde, dias):
+            for h in horas:
+                if not franja or franja_de(h) == franja:
+                    ofertas.append({"dia": dia, "hora": h, "franja": franja_de(h), "plazas": 1,
+                                    "texto": f"{fecha_corta(dia)} · {h}"})
+    return ofertas
+
+
+def cupo_disponible(db, clinica, fecha, franja):
+    for dia, franjas in cupos_libres(db, clinica, desde=fecha, dias=1):
+        return franjas[franja]["libres"] > 0
+    return False
 
 
 def hueco_disponible(db, clinica, fecha, hora, duracion):
@@ -497,12 +612,7 @@ def buscar_clinicas(db, tipo="", necesidad="", cp="", franja="", requisitos=(), 
 
         duracion = servicio_sugerido["duracion"] if servicio_sugerido else (
             servicios[0]["duracion"] if servicios else None)
-        semana = huecos_libres(db, c, duracion)
-        if franja == "manana":
-            semana = [(d, [h for h in hs if h < "14:00"]) for d, hs in semana]
-        elif franja == "tarde":
-            semana = [(d, [h for h in hs if h >= "14:00"]) for d, hs in semana]
-        proximos = [(d, h) for d, hs in semana for h in hs]
+        proximos = disponibilidad(db, c, duracion, franja)
         dist, dist_texto = distancia(c, cp, lat, lon)
         media = db.execute("SELECT AVG(puntuacion) m, COUNT(*) n FROM valoraciones WHERE clinica_id = ?",
                            (c["id"],)).fetchone()
@@ -512,7 +622,7 @@ def buscar_clinicas(db, tipo="", necesidad="", cp="", franja="", requisitos=(), 
             "servicio_sugerido": servicio_sugerido,
             "caracteristicas": caract,
             "proximos": proximos[:6],
-            "total_huecos": len(proximos),
+            "total_huecos": sum(p["plazas"] for p in proximos),
             "distancia": dist,
             "distancia_texto": dist_texto,
             "relevancia": relevancia,
@@ -521,7 +631,10 @@ def buscar_clinicas(db, tipo="", necesidad="", cp="", franja="", requisitos=(), 
         })
 
     def primer_hueco(r):
-        return (r["proximos"][0][0], r["proximos"][0][1]) if r["proximos"] else (date.max, "99:99")
+        if not r["proximos"]:
+            return (date.max, "99:99")
+        p = r["proximos"][0]
+        return (p["dia"], p["hora"] or a_hhmm(FRANJAS[p["franja"]][1]))
 
     sin_huecos = [r for r in resultados if not r["proximos"]]
     con_huecos = [r for r in resultados if r["proximos"]]
@@ -654,10 +767,11 @@ def crear_app(config=None):
         asegurar_admin(app.config["BASE_DATOS"], os.environ["CITAS_ADMIN_EMAIL"].lower(),
                        os.environ["CITAS_ADMIN_CLAVE"])
 
-    app.jinja_env.filters.update(fecha_bonita=fecha_bonita, fecha_corta=fecha_corta,
+    app.jinja_env.filters.update(fecha_bonita=fecha_bonita, fecha_corta=fecha_corta, cuando=cuando,
                                  euros=lambda x: f"{x:,.2f} €".replace(",", "X").replace(".", ",").replace("X", "."))
     app.jinja_env.globals.update(TIPOS=TIPOS, CARACTERISTICAS=CARACTERISTICAS,
                                  ESTADOS_CITA=ESTADOS_CITA, DIAS=DIAS, COLORES=COLORES,
+                                 FRANJAS=FRANJAS, MODOS=MODOS,
                                  csrf=campo_csrf, token_csrf=token_csrf, puede_valorarse=puede_valorarse,
                                  demo=app.config["DEMO"], cuentas_demo=cuentas_demo)
 
@@ -827,8 +941,7 @@ def registrar_rutas(app):
             puntos.append({
                 "nombre": c["nombre"], "lat": c["lat"], "lon": c["lon"], "color": c["color"],
                 "tipo": TIPOS[c["tipo"]][0], "distancia": r["distancia_texto"],
-                "proximo": (f"{fecha_corta(r['proximos'][0][0])} · {r['proximos'][0][1]}"
-                            if r["proximos"] else "Sin huecos esta semana"),
+                "proximo": r["proximos"][0]["texto"] if r["proximos"] else "Sin huecos esta semana",
                 "url": url_for("clinica", cid=c["id"], servicio=s["id"] if s else None),
             })
         return render_template("buscar.html", resultados=resultados, inferidos=inferidos, tipo=tipo,
@@ -848,7 +961,10 @@ def registrar_rutas(app):
             servicio = servicios[0]
         semana = max(0, min(request.args.get("semana", 0, type=int), 7))
         desde = ahora().date() + timedelta(days=7 * semana)
-        huecos = huecos_libres(get_db(), c, servicio["duracion"] if servicio else None, desde=desde)
+        if c["modo"] == "franjas":
+            huecos = cupos_libres(get_db(), c, desde=desde)
+        else:
+            huecos = huecos_libres(get_db(), c, servicio["duracion"] if servicio else None, desde=desde)
         horario = {}
         for h in todas("SELECT * FROM horarios WHERE clinica_id = ? ORDER BY dia_semana, inicio", cid):
             horario.setdefault(h["dia_semana"], []).append(f"{h['inicio']}–{h['fin']}")
@@ -885,31 +1001,48 @@ def registrar_rutas(app):
         datos = request.form if request.method == "POST" else request.args
         servicio = una("SELECT * FROM servicios WHERE id = ? AND clinica_id = ?",
                        datos.get("servicio", type=int), cid)
+        por_franja = c["modo"] == "franjas"
         try:
             fecha = date.fromisoformat(datos.get("fecha", ""))
-            hora = a_hhmm(a_minutos(datos.get("hora", "")))
+            if por_franja:
+                franja, hora = datos.get("franja", ""), ""
+                if franja not in FRANJAS:
+                    raise ValueError
+            else:
+                hora = a_hhmm(a_minutos(datos.get("hora", "")))
+                franja = franja_de(hora)
         except (ValueError, AttributeError):
-            flash("Elige un día y una hora de la lista.", "error")
+            flash("Elige un día y una " + ("franja" if por_franja else "hora") + " de la lista.", "error")
             return redirect(url_for("clinica", cid=cid))
         if not servicio:
             flash("Elige primero el servicio que necesitas.", "error")
             return redirect(url_for("clinica", cid=cid))
-        if not hueco_disponible(get_db(), c, fecha, hora, servicio["duracion"]):
+        libre = (cupo_disponible(get_db(), c, fecha, franja) if por_franja
+                 else hueco_disponible(get_db(), c, fecha, hora, servicio["duracion"]))
+        if not libre:
             flash("Ese hueco ya no está libre. Elige otro, por favor.", "error")
             return redirect(url_for("clinica", cid=cid, servicio=servicio["id"]))
         if request.method == "GET":
-            return render_template("reservar.html", c=c, servicio=servicio, fecha=fecha, hora=hora)
+            datos_franja = cupos_libres(get_db(), c, desde=fecha, dias=1)[0][1][franja] if por_franja else None
+            return render_template("reservar.html", c=c, servicio=servicio, fecha=fecha, hora=hora,
+                                   franja=franja, datos_franja=datos_franja)
 
-        estado = "confirmada" if c["confirmacion_automatica"] else "pendiente"
+        preferencia = campo("preferencia", 5) if por_franja else ""
+        estado = "confirmada" if c["confirmacion_automatica"] and not por_franja else "pendiente"
         db = get_db()
         db.execute(
             "INSERT INTO citas (clinica_id, paciente_id, servicio_id, fecha, hora, duracion, estado, "
-            "mensaje_paciente, llamar_antes, creado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "mensaje_paciente, llamar_antes, franja, preferencia, creado) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (cid, g.usuario["id"], servicio["id"], fecha.isoformat(), hora, servicio["duracion"], estado,
-             campo("mensaje", 1000), 1 if request.form.get("llamar_antes") else 0, ahora().isoformat()))
+             campo("mensaje", 1000), 1 if request.form.get("llamar_antes") else 0, franja, preferencia,
+             ahora().isoformat()))
         db.commit()
         if estado == "confirmada":
             flash(f"¡Cita confirmada! {fecha_bonita(fecha)} a las {hora} en {c['nombre']}.", "ok")
+        elif por_franja:
+            flash(f"Solicitud enviada. {c['nombre']} te confirmará la hora exacta del {fecha_bonita(fecha)} "
+                  f"por la {FRANJAS[franja][0].lower()}.", "ok")
         else:
             flash(f"Solicitud enviada. {c['nombre']} te confirmará la cita del {fecha_bonita(fecha)} "
                   f"a las {hora}.", "ok")
@@ -983,14 +1116,14 @@ def registrar_rutas(app):
                                   ahora().isoformat()))
                 uid = cur.lastrowid
                 cur = db.execute("INSERT INTO clinicas (usuario_id, nombre, tipo, codigo_postal, telefono, "
-                                 "direccion, ciudad, color, creado) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                 "direccion, ciudad, color, creado, modo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'franjas')",
                                  (uid, nombre, tipo, cp, tel, campo("direccion", 200), campo("ciudad", 80),
                                   secrets.choice(COLORES), ahora().isoformat()))
                 horario_por_defecto(db, cur.lastrowid)
                 db.commit()
                 iniciar_sesion(uid)
-                flash("Clínica creada con un horario de ejemplo (L-V 9-14 y 16-20). "
-                      "Completa tu ficha y añade servicios para aparecer en las búsquedas.", "ok")
+                flash("Clínica creada con un horario de ejemplo (L-V 9-14 y 16-20). Completa tu ficha, añade "
+                      "servicios y publica tus huecos de la semana para aparecer en las búsquedas.", "ok")
                 return redirect(url_for("panel_perfil"))
             for e in errores:
                 flash(e, "error")
@@ -1026,7 +1159,8 @@ def registrar_rutas(app):
             "LEFT JOIN servicios s ON s.id = ci.servicio_id LEFT JOIN valoraciones v ON v.cita_id = ci.id "
             "WHERE ci.paciente_id = ? ORDER BY ci.fecha, ci.hora", uid)
         hoy = ahora().strftime("%Y-%m-%d %H:%M")
-        proximas = [c for c in citas if f"{c['fecha']} {c['hora']}" >= hoy and c["estado"] in ESTADOS_OCUPAN]
+        proximas = [c for c in citas if f"{c['fecha']} {c['hora'] or '23:59'}" >= hoy
+                    and c["estado"] in ESTADOS_OCUPAN]
         historial = [c for c in citas if c not in proximas][::-1]
         mensajes = todas("SELECT m.*, cl.nombre clinica, cl.telefono tel_clinica FROM mensajes m "
                          "JOIN clinicas cl ON cl.id = m.clinica_id WHERE m.paciente_id = ? "
@@ -1115,8 +1249,14 @@ def registrar_rutas(app):
         dias_agenda = {}
         for a in agenda:
             dias_agenda.setdefault(a["fecha"], []).append(a)
-        libres = sum(len(h) for _, h in huecos_libres(get_db(), g.clinica))
+        if g.clinica["modo"] == "franjas":
+            semana = cupos_libres(get_db(), g.clinica)
+            libres = sum(f["libres"] for _, fr in semana for f in fr.values())
+        else:
+            libres = sum(len(h) for _, h in huecos_libres(get_db(), g.clinica))
         faltan = []
+        if g.clinica["modo"] == "franjas" and not libres:
+            faltan.append(("Publica tus huecos de esta semana", url_for("panel_huecos")))
         if not una("SELECT 1 FROM servicios WHERE clinica_id = ?", cid):
             faltan.append(("Añade al menos un servicio", url_for("panel_servicios")))
         if not g.clinica["descripcion"]:
@@ -1144,10 +1284,19 @@ def registrar_rutas(app):
         if not c or accion not in transiciones or c["estado"] not in transiciones[accion][0]:
             abort(404)
         respuesta = campo("respuesta", 800)
+        hora = c["hora"]
+        if accion == "confirmar" and not hora:
+            # Solicitud por franja: la clínica fija la hora al confirmar.
+            try:
+                hora = a_hhmm(a_minutos(campo("hora", 5)))
+            except (ValueError, IndexError):
+                flash("Indica la hora de la cita para confirmarla.", "error")
+                return redirect(url_for("panel"))
         db = get_db()
         ya_paciente = 1 if request.form.get("ya_paciente") else c["ya_paciente"]
-        db.execute("UPDATE citas SET estado = ?, respuesta_clinica = ?, visto_paciente = 0, ya_paciente = ? "
-                   "WHERE id = ?", (transiciones[accion][1], respuesta or c["respuesta_clinica"], ya_paciente, id))
+        db.execute("UPDATE citas SET estado = ?, respuesta_clinica = ?, visto_paciente = 0, ya_paciente = ?, "
+                   "hora = ? WHERE id = ?",
+                   (transiciones[accion][1], respuesta or c["respuesta_clinica"], ya_paciente, hora, id))
         db.commit()
         flash({"confirmar": "Cita confirmada.", "rechazar": "Solicitud rechazada; el paciente lo verá en su panel.",
                "cancelar": "Cita cancelada y paciente avisado en su panel.",
@@ -1193,16 +1342,55 @@ def registrar_rutas(app):
             db.execute(
                 "UPDATE clinicas SET nombre=?, tipo=?, eslogan=?, descripcion=?, direccion=?, ciudad=?, "
                 "codigo_postal=?, telefono=?, web=?, foto=?, color=?, caracteristicas=?, duracion_hueco=?, "
-                "confirmacion_automatica=?, activa=?, lat=?, lon=? WHERE id=?",
+                "confirmacion_automatica=?, activa=?, lat=?, lon=?, modo=? WHERE id=?",
                 (nombre, tipo, campo("eslogan", 140), campo("descripcion", 3000), campo("direccion", 200),
                  campo("ciudad", 80), cp, campo("telefono", 30), campo("web", 200), foto, color, caract,
                  duracion, 1 if request.form.get("confirmacion_automatica") else 0,
-                 1 if request.form.get("activa") else 0, lat, lon, c["id"]))
+                 1 if request.form.get("activa") else 0, lat, lon,
+                 request.form.get("modo") if request.form.get("modo") in MODOS else c["modo"], c["id"]))
             db.commit()
             flash("Ficha guardada.", "ok")
             return redirect(url_for("panel_perfil"))
         return render_template("panel_perfil.html", c=g.clinica,
                                caract=set(filter(None, g.clinica["caracteristicas"].split(","))))
+
+    @app.route("/panel/huecos", methods=["GET", "POST"])
+    @requiere("clinica")
+    def panel_huecos():
+        """Rejilla de dos semanas: cuántos huecos hay cada mañana y cada tarde."""
+        c = g.clinica
+        db = get_db()
+        hoy = ahora().date()
+        if request.method == "POST":
+            if request.form.get("accion") == "copiar":
+                # Repite en la semana siguiente lo publicado para los próximos 7 días.
+                for r in db.execute("SELECT fecha, franja, plazas FROM cupos WHERE clinica_id = ? AND fecha >= ? "
+                                    "AND fecha < ?", (c["id"], hoy.isoformat(),
+                                                      (hoy + timedelta(days=7)).isoformat())).fetchall():
+                    destino = (date.fromisoformat(r["fecha"]) + timedelta(days=7)).isoformat()
+                    db.execute("INSERT INTO cupos (clinica_id, fecha, franja, plazas) VALUES (?, ?, ?, ?) "
+                               "ON CONFLICT (clinica_id, fecha, franja) DO UPDATE SET plazas = excluded.plazas",
+                               (c["id"], destino, r["franja"], r["plazas"]))
+                flash("Copiado a la semana siguiente. Revisa y ajusta lo que cambie.", "ok")
+            else:
+                for n in range(14):
+                    dia = (hoy + timedelta(days=n)).isoformat()
+                    for f in FRANJAS:
+                        valor = request.form.get(f"{dia}_{f}")
+                        if valor is None:
+                            continue
+                        try:
+                            plazas = max(0, min(int(valor or 0), 50))
+                        except ValueError:
+                            continue
+                        db.execute("INSERT INTO cupos (clinica_id, fecha, franja, plazas) VALUES (?, ?, ?, ?) "
+                                   "ON CONFLICT (clinica_id, fecha, franja) DO UPDATE SET plazas = excluded.plazas",
+                                   (c["id"], dia, f, plazas))
+                flash("Huecos publicados. Los pacientes ya los ven.", "ok")
+            db.commit()
+            return redirect(url_for("panel_huecos"))
+        semanas = [cupos_libres(db, c, hoy, 7), cupos_libres(db, c, hoy + timedelta(days=7), 7)]
+        return render_template("panel_huecos.html", semanas=semanas, hoy=hoy)
 
     @app.route("/panel/servicios", methods=["GET", "POST"])
     @requiere("clinica")

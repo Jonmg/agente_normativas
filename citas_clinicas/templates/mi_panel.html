@@ -13,7 +13,7 @@
       {% for c in proximas %}
         <div class="cita {% if c.id in novedades %}nuevo{% endif %}">
           <div>
-            <b>{{ c.fecha|fecha_bonita }} · {{ c.hora }}</b> <span class="estado {{ c.estado }}">{{ ESTADOS_CITA[c.estado] }}</span><br>
+            <b>{{ c|cuando }}</b>{% if not c.hora %} <span class="suave pequeno">· hora por confirmar</span>{% endif %} <span class="estado {{ c.estado }}">{{ ESTADOS_CITA[c.estado] }}</span><br>
             <a href="{{ url_for('clinica', cid=c.clinica_id) }}">{{ c.clinica }}</a> · {{ c.servicio or 'Servicio' }} ({{ c.duracion }} min)
             {% if c.respuesta_clinica %}<br><span class="pequeno">💬 <i>{{ c.respuesta_clinica }}</i></span>{% endif %}
           </div>
@@ -37,7 +37,7 @@
       {% for c in historial %}
         <div class="cita {% if c.id in novedades %}nuevo{% endif %}">
           <div>
-            {{ c.fecha|fecha_bonita }} · {{ c.hora }} <span class="estado {{ c.estado if c.estado != 'confirmada' else 'completada' }}">{{ ESTADOS_CITA[c.estado] if c.estado != 'confirmada' else 'Pasada' }}</span><br>
+            {{ c|cuando }} <span class="estado {{ c.estado if c.estado != 'confirmada' else 'completada' }}">{{ ESTADOS_CITA[c.estado] if c.estado != 'confirmada' else 'Pasada' }}</span><br>
             <a href="{{ url_for('clinica', cid=c.clinica_id) }}">{{ c.clinica }}</a> · {{ c.servicio or 'Servicio' }}
             {% if c.respuesta_clinica %}<br><span class="pequeno">💬 <i>{{ c.respuesta_clinica }}</i></span>{% endif %}
             {% if c.puntuacion %}<br><span class="estrellas">{{ '★' * c.puntuacion }}</span> <span class="pequeno suave">Tu valoración</span>{% endif %}

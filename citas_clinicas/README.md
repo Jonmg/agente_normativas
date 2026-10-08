@@ -41,9 +41,9 @@ real haría falta un disco persistente o una base de datos gestionada.
 
 | Perfil | Email | Qué tiene de particular |
 |---|---|---|
-| 🦶 Podología Pasos (Madrid 28010) | podologia@demo.es | Confirma a mano, huecos cada 15 min, día bloqueado por formación |
+| 🦶 Podología Pasos (Madrid 28010) | podologia@demo.es | **Huecos por franja**, solicitudes pendientes de hora, día bloqueado |
 | 💆 Manos en Calma (Madrid 28014) | masaje@demo.es | **Confirmación automática**, atiende a domicilio, abre sábados |
-| 🦷 Sonrisa Norte (Madrid 28046) | dental@demo.es | Revisión gratis, urgencias, mensaje de llamada pendiente |
+| 🦷 Sonrisa Norte (Madrid 28046) | dental@demo.es | **Huecos por franja**, revisión gratis, urgencias, mensaje pendiente |
 | 💪 FisioActiva Getafe (28901) | fisio@demo.es | Abre a las 8:00, suelo pélvico, punción seca |
 | 👤 Paciente Ana López (28010) | paciente@demo.es | Citas confirmadas, pendientes y una pasada para valorar |
 | 🛠️ Administración | admin@demo.es | Panel de captación y facturación de toda la plataforma |
@@ -72,6 +72,18 @@ O regístrate tú como paciente en «Crear cuenta», o como clínica en «Regist
 - Solicitudes: confirmar o rechazar con mensaje; o confirmación automática.
 - Mensajes y peticiones de llamada; agenda de 14 días; marcar citas como realizadas.
 - Solo pueden valorar pacientes con una cita real.
+
+**Dos formas de publicar disponibilidad** (cada clínica elige en «Ficha»)
+- **Huecos por franja** (por defecto en clínicas nuevas): la clínica dice cuántos huecos
+  tiene cada mañana y cada tarde de los próximos 14 días («lunes mañana: 3»). El paciente
+  pide la franja e indica su hora preferida; la clínica confirma poniendo la hora exacta.
+  Las solicitudes descuentan huecos solas, y cancelar los devuelve. Se rellena en un par
+  de minutos y hay un botón para repetir la semana.
+- **Agenda exacta**: horas concretas generadas a partir del horario, con confirmación
+  automática opcional. Para clínicas que quieren reserva inmediata.
+
+Es el modelo de los restaurantes en ElTenedor/OpenTable: el local no entrega toda su
+agenda, solo un cupo de plazas por turno, y conserva el control del resto.
 
 **Mapa**
 - Búsqueda con mapa de las clínicas (chincheta del color de cada una, próximo hueco al tocarla).

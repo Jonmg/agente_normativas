@@ -152,3 +152,19 @@ details summary { cursor: pointer; color: var(--primario); font-weight: 600; }
 .tabla-scroll table { min-width: 860px; font-size: .9rem; }
 td.num, th.num { text-align: right; white-space: nowrap; }
 .inactiva { opacity: .55; }
+
+.franjas { display: grid; gap: 6px; }
+.franja { display: block; border: 1px solid var(--borde); border-radius: 8px; padding: 6px; text-align: center;
+          font-size: .82rem; text-decoration: none; color: var(--texto); background: #fff; }
+.franja b, .franja span, .franja small { display: block; }
+.franja small { color: var(--suave); font-size: .72rem; }
+.franja.libre { border-color: var(--acento, var(--primario)); }
+.franja.libre span { color: var(--acento, var(--primario)); font-weight: 700; }
+a.franja.libre:hover { background: var(--acento, var(--primario)); color: #fff; }
+a.franja.libre:hover span, a.franja.libre:hover small { color: #fff; }
+.franja.completa { background: #f8fafc; color: var(--suave); }
+.franja.cerrada { background: #f2f4f7; color: #98a2b3; border-style: dashed; }
+@media (max-width: 800px) { .franjas { grid-template-columns: 1fr 1fr; } }
+.rejilla-huecos td, .rejilla-huecos th { text-align: center; }
+.rejilla-huecos input[type=number] { width: 72px; text-align: center; }
+.rejilla-huecos td.dia-celda { text-align: left; white-space: nowrap; }

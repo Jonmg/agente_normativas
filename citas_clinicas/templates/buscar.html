@@ -78,10 +78,12 @@
             {% for k in r.caracteristicas %}<li class="etiqueta">{{ CARACTERISTICAS[k] }}</li>{% endfor %}
           </ul>
           {% if r.proximos and s %}
-            <div class="pequeno"><b>{{ r.total_huecos }} hueco{{ '' if r.total_huecos == 1 else 's' }} libres</b> para «{{ s.nombre }}» ({{ s.duracion }} min). Próximos:</div>
+            <div class="pequeno"><b>{{ r.total_huecos }} hueco{{ '' if r.total_huecos == 1 else 's' }} libres</b>
+              {% if c.modo == 'franjas' %}esta semana · <span class="suave">la clínica te confirma la hora</span>
+              {% else %}para «{{ s.nombre }}» ({{ s.duracion }} min){% endif %}. Próximos:</div>
             <div class="huecos">
-              {% for d, h in r.proximos %}
-                <a class="hueco" href="{{ url_for('reservar', cid=c.id, servicio=s.id, fecha=d.isoformat(), hora=h) }}">{{ d|fecha_corta }} · {{ h }}</a>
+              {% for p in r.proximos %}
+                <a class="hueco" href="{{ url_for('reservar', cid=c.id, servicio=s.id, fecha=p.dia.isoformat(), hora=p.hora, franja=p.franja if not p.hora else None) }}">{{ p.texto }}</a>
               {% endfor %}
               <a class="hueco" href="{{ url_for('clinica', cid=c.id, servicio=s.id) }}">Ver semana →</a>
             </div>

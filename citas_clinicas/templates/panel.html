@@ -36,12 +36,16 @@
       {% for c in pendientes %}
         <div class="cita">
           <div style="flex:1 1 300px">
-            <b>{{ c.fecha|fecha_bonita }} · {{ c.hora }}</b> · {{ c.servicio or 'Servicio' }} ({{ c.duracion }} min)<br>
+            <b>{{ c|cuando }}</b> · {{ c.servicio or 'Servicio' }} ({{ c.duracion }} min)<br>
             {{ c.paciente }} · <a href="tel:{{ c.telefono }}">{{ c.telefono }}</a> · <a href="mailto:{{ c.email }}">{{ c.email }}</a>
             {% if c.llamar_antes %}<br><span class="estado pendiente">Prefiere que le llamen para confirmar</span>{% endif %}
             {% if c.mensaje_paciente %}<p class="pequeno" style="margin:4px 0">💬 <i>{{ c.mensaje_paciente }}</i></p>{% endif %}
           </div>
           <form method="post" style="flex:1 1 220px">{{ csrf() }}
+            {% if not c.hora %}
+              <label class="pequeno" style="margin:0 0 4px" for="hora{{ c.id }}">Hora de la cita</label>
+              <input type="time" id="hora{{ c.id }}" name="hora" value="{{ c.preferencia }}" style="margin-bottom:6px">
+            {% endif %}
             <input type="text" name="respuesta" placeholder="Mensaje para el paciente (opcional)">
             <label class="casilla pequeno" style="margin:6px 0 0"><input type="checkbox" name="ya_paciente" value="1"> Ya era paciente mío</label>
             <div class="fila" style="margin-top:6px">
@@ -83,7 +87,7 @@
       <p class="suave pequeno">Márcalas como realizadas para que el paciente pueda valorarte.</p>
       {% for c in por_completar %}
         <div class="cita">
-          <div>{{ c.fecha|fecha_bonita }} · {{ c.hora }} · {{ c.paciente }} · {{ c.servicio or 'Servicio' }}</div>
+          <div>{{ c|cuando }} · {{ c.paciente }} · {{ c.servicio or 'Servicio' }}</div>
           <form method="post" action="{{ url_for('accion_cita', id=c.id, accion='completar') }}">{{ csrf() }}
             <button class="secundario pequeno">Realizada</button></form>
         </div>

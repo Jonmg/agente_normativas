@@ -82,9 +82,11 @@ class Huecos(Base):
         db, c = self.clinica("Podología Pasos")
         semana = dict(modulo.huecos_libres(db, c, 30))
         martes = date(2026, 10, 6)
-        # Lucía pidió quiropodia (30 min) a las 09:00 y Pablo tiene estudio de pisada (60 min) a las 10:00.
-        for ocupada in ("09:00", "09:15", "10:00", "10:45"):
+        # Pablo tiene estudio de pisada (60 min) a las 10:00. La solicitud de Lucía es por franja,
+        # sin hora todavía: no bloquea ninguna hora concreta.
+        for ocupada in ("10:00", "10:15", "10:45"):
             self.assertNotIn(ocupada, semana[martes])
+        self.assertIn("09:00", semana[martes])
         self.assertIn("09:30", semana[martes])   # 09:30-10:00 cabe justo
         self.assertIn("11:00", semana[martes])
         self.assertNotIn("13:45", semana[martes])  # no cabe antes de cerrar a las 14:00
@@ -133,19 +135,29 @@ class FlujoPaciente(Base):
         c = db.execute("SELECT * FROM clinicas WHERE nombre = 'Podología Pasos'").fetchone()
         s = db.execute("SELECT * FROM servicios WHERE clinica_id = ? AND nombre LIKE 'Quiropodia%'",
                        (c["id"],)).fetchone()
-        r = self.cli.get(f"/clinica/{c['id']}/reservar?servicio={s['id']}&fecha=2026-10-07&hora=12:00")
-        self.assertIn("Revisa tu cita", r.get_data(as_text=True))
-        r = self.post(f"/clinica/{c['id']}/reservar", servicio=s["id"], fecha="2026-10-07", hora="12:00",
-                      mensaje="Primera vez")
-        self.assertIn("Solicitud enviada", r.get_data(as_text=True))
+        # Podología publica huecos por franja: el miércoles por la mañana solo queda uno.
+        db.execute("UPDATE cupos SET plazas = 1 WHERE clinica_id = ? AND fecha = '2026-10-07' AND franja = 'manana'",
+                   (c["id"],))
+        db.commit()
+        r = self.cli.get(f"/clinica/{c['id']}/reservar?servicio={s['id']}&fecha=2026-10-07&franja=manana")
+        html = r.get_data(as_text=True)
+        self.assertIn("Revisa tu cita", html)
+        self.assertIn("por la mañana", html)
+        self.assertIn("Hacia las 11:00", html)
+        r = self.post(f"/clinica/{c['id']}/reservar", servicio=s["id"], fecha="2026-10-07", franja="manana",
+                      preferencia="11:00", mensaje="Primera vez")
+        self.assertIn("te confirmará la hora exacta", r.get_data(as_text=True))
         cita = db.execute("SELECT * FROM citas WHERE mensaje_paciente = 'Primera vez'").fetchone()
-        self.assertEqual(cita["estado"], "pendiente")
-        # El mismo hueco ya no se puede volver a pedir.
-        r = self.post(f"/clinica/{c['id']}/reservar", servicio=s["id"], fecha="2026-10-07", hora="12:00")
+        self.assertEqual((cita["estado"], cita["hora"], cita["franja"], cita["preferencia"]),
+                         ("pendiente", "", "manana", "11:00"))
+        # Agotado: el cupo ya no se puede volver a pedir.
+        r = self.post(f"/clinica/{c['id']}/reservar", servicio=s["id"], fecha="2026-10-07", franja="manana")
         self.assertIn("ya no está libre", r.get_data(as_text=True))
         r = self.post(f"/mi/cita/{cita['id']}/cancelar", motivo="No puedo")
         self.assertEqual(db.execute("SELECT estado FROM citas WHERE id = ?", (cita["id"],)).fetchone()[0],
                          "cancelada")
+        # Cancelar libera el hueco.
+        self.assertTrue(modulo.cupo_disponible(db, c, date(2026, 10, 7), "manana"))
 
     def test_confirmacion_automatica(self):
         self.entrar("paciente@demo.es")
@@ -154,6 +166,9 @@ class FlujoPaciente(Base):
         s = db.execute("SELECT * FROM servicios WHERE clinica_id = ? LIMIT 1", (c["id"],)).fetchone()
         r = self.post(f"/clinica/{c['id']}/reservar", servicio=s["id"], fecha="2026-10-08", hora="11:00")
         self.assertIn("Cita confirmada", r.get_data(as_text=True))
+        # Agenda exacta: la misma hora no se puede reservar dos veces.
+        r = self.post(f"/clinica/{c['id']}/reservar", servicio=s["id"], fecha="2026-10-08", hora="11:00")
+        self.assertIn("ya no está libre", r.get_data(as_text=True))
 
     def test_reserva_requiere_cuenta(self):
         r = self.cli.get("/clinica/1/reservar?servicio=1&fecha=2026-10-07&hora=12:00")
@@ -191,7 +206,12 @@ class FlujoClinica(Base):
                   color="#d1495b", descripcion="Tratamos dolor cervical", activa="1", duracion_hueco="30")
         html = self.cli.get("/buscar?tipo=osteopatia").get_data(as_text=True)
         self.assertIn("Osteo Norte", html)
-        self.assertIn("Sesión de osteopatía", html)
+        self.assertIn("Sin huecos online", html)  # aún no ha publicado huecos
+        self.assertIn("Publica tus huecos", self.cli.get("/panel").get_data(as_text=True))
+        # Las clínicas nuevas publican por franjas: martes 3 por la mañana.
+        self.post("/panel/huecos", **{"2026-10-06_manana": "3", "2026-10-06_tarde": "0"})
+        html = self.cli.get("/buscar?tipo=osteopatia").get_data(as_text=True)
+        self.assertIn("Mar 6 · mañana (3)", html)
 
     def test_confirmar_solicitud(self):
         self.entrar("podologia@demo.es")
@@ -199,9 +219,13 @@ class FlujoClinica(Base):
         self.assertIn("Solicitudes pendientes", html)
         db = self.db()
         cita = db.execute("SELECT * FROM citas WHERE estado = 'pendiente' AND clinica_id = 1 LIMIT 1").fetchone()
-        self.post(f"/panel/cita/{cita['id']}/confirmar", respuesta="Te esperamos")
-        fila = db.execute("SELECT estado, visto_paciente FROM citas WHERE id = ?", (cita["id"],)).fetchone()
-        self.assertEqual(tuple(fila), ("confirmada", 0))
+        self.assertIn('type="time"', html)  # solicitud por franja: hay que poner la hora
+        # Sin hora no se puede confirmar una solicitud por franja.
+        r = self.post(f"/panel/cita/{cita['id']}/confirmar", respuesta="Te esperamos")
+        self.assertIn("Indica la hora", r.get_data(as_text=True))
+        self.post(f"/panel/cita/{cita['id']}/confirmar", respuesta="Te esperamos", hora="9:30")
+        fila = db.execute("SELECT estado, visto_paciente, hora FROM citas WHERE id = ?", (cita["id"],)).fetchone()
+        self.assertEqual(tuple(fila), ("confirmada", 0, "09:30"))
 
     def test_no_toca_citas_ajenas(self):
         self.entrar("podologia@demo.es")
@@ -244,6 +268,68 @@ class ModoDemo(unittest.TestCase):
             db.close()
 
 
+class Franjas(Base):
+    def podologia(self):
+        db = self.db()
+        return db, db.execute("SELECT * FROM clinicas WHERE nombre = 'Podología Pasos'").fetchone()
+
+    def test_huecos_menos_solicitudes(self):
+        db, c = self.podologia()
+        semana = dict(modulo.cupos_libres(db, c))
+        martes = semana[date(2026, 10, 6)]
+        # Publicó 2 por la mañana; Lucía pidió 1 (pendiente) y Pablo tiene 1 confirmada a las 10:00.
+        self.assertEqual((martes["manana"]["plazas"], martes["manana"]["ocupadas"], martes["manana"]["libres"]),
+                         (2, 2, 0))
+        self.assertEqual(martes["tarde"]["libres"], 1)
+        self.assertEqual(martes["manana"]["horario"], "09:00–14:00")
+        self.assertFalse(semana[date(2026, 10, 10)]["manana"]["abierto"])  # sábado cerrado
+
+    def test_hoy_franja_casi_cerrada(self):
+        db, c = self.podologia()
+        with mock.patch.object(modulo, "ahora", lambda: datetime(2026, 10, 5, 13, 30)):
+            hoy = dict(modulo.cupos_libres(db, c))[date(2026, 10, 5)]
+        self.assertFalse(hoy["manana"]["abierto"])  # cierra a las 14:00: ya no se ofrece
+        self.assertTrue(hoy["tarde"]["abierto"])
+
+    def test_dia_bloqueado(self):
+        db, c = self.podologia()
+        semana = dict(modulo.cupos_libres(db, c, dias=14))
+        self.assertEqual(semana[date(2026, 10, 13)]["manana"]["libres"], 0)  # formación del equipo
+
+    def test_filtro_franja_en_busqueda(self):
+        db, c = self.podologia()
+        tardes = modulo.disponibilidad(db, c, franja="tarde")
+        self.assertTrue(tardes)
+        self.assertTrue(all(o["franja"] == "tarde" and o["hora"] is None for o in tardes))
+        html = self.cli.get("/buscar?tipo=podologia&franja=manana").get_data(as_text=True)
+        self.assertIn("mañana (", html)
+        self.assertNotIn("tarde (", html)
+
+    def test_ficha_muestra_franjas(self):
+        html = self.cli.get("/clinica/1?servicio=1").get_data(as_text=True)
+        self.assertIn("Elige día y franja", html)
+        self.assertIn("Completo", html)  # martes por la mañana
+        self.assertIn("franja=tarde", html)
+
+    def test_publicar_y_copiar(self):
+        self.entrar("podologia@demo.es")
+        self.post("/panel/huecos", **{"2026-10-09_manana": "5", "2026-10-09_tarde": "abc"})
+        db, c = self.podologia()
+        plazas = dict(db.execute("SELECT franja, plazas FROM cupos WHERE clinica_id = 1 AND fecha = '2026-10-09'"))
+        self.assertEqual(plazas, {"manana": 5, "tarde": 0})  # un valor no numérico no cambia nada
+        self.post("/panel/huecos", accion="copiar")
+        fila = db.execute("SELECT plazas FROM cupos WHERE clinica_id = 1 AND fecha = '2026-10-16' "
+                          "AND franja = 'manana'").fetchone()
+        self.assertEqual(fila[0], 5)
+        self.assertIn("¿Cuántos huecos libres tienes?", self.cli.get("/panel/huecos").get_data(as_text=True))
+
+    def test_paciente_ve_franja_y_luego_hora(self):
+        self.entrar("paciente@demo.es")
+        html = self.cli.get("/mi").get_data(as_text=True)
+        self.assertIn("tarde (prefiere hacia las 17:00)", html)
+        self.assertIn("hora por confirmar", html)
+
+
 class Captacion(Base):
     OCTUBRE = (date(2026, 10, 1), date(2026, 11, 1))
 
@@ -265,7 +351,7 @@ class Captacion(Base):
         self.entrar("dental@demo.es")
         db = self.db()
         cita = db.execute("SELECT id FROM citas WHERE clinica_id = 3 AND estado = 'pendiente'").fetchone()
-        self.post(f"/panel/cita/{cita['id']}/confirmar", ya_paciente="1")
+        self.post(f"/panel/cita/{cita['id']}/confirmar", ya_paciente="1", hora="09:00")
         r = self.por_clinica()["Clínica Dental Sonrisa Norte"]
         self.assertEqual((r["nuevos"], r["facturables"]), (3, 2))
 
@@ -383,8 +469,8 @@ class Migracion(unittest.TestCase):
             db.close()
             db = modulo.iniciar_bd(f"{tmp}/v.db")
             db.execute("INSERT INTO usuarios (email, clave, rol, nombre, creado) VALUES ('ad@b.es', 'x', 'admin', 'Ad', '')")
-            fila = db.execute("SELECT nombre, lat, tarifa FROM clinicas").fetchone()
-            self.assertEqual(tuple(fila), ("Vieja", None, None))
+            fila = db.execute("SELECT nombre, lat, tarifa, modo FROM clinicas").fetchone()
+            self.assertEqual(tuple(fila), ("Vieja", None, None, "agenda"))  # las existentes siguen igual
             self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
             db.close()
 
