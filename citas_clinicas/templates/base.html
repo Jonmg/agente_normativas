@@ -26,6 +26,8 @@
     {% endif %}
   </nav>
 </header>
+{% if demo %}<div class="banda-demo">Demo: los datos son ficticios y se reinician de vez en cuando. No uses datos reales.
+  {% if not g.usuario %}<a href="{{ url_for('entrar') }}">Entrar con una cuenta de prueba</a>{% endif %}</div>{% endif %}
 <main class="{% block clase_main %}contenedor{% endblock %}">
   {% with mensajes = get_flashed_messages(with_categories=true) %}
     {% if mensajes %}<div class="avisos">

@@ -16,6 +16,27 @@ python app.py --demo      # crea datos/citas.db con datos de ejemplo y arranca
 Abre http://127.0.0.1:5000. Para verla desde el móvil en la misma red:
 `HOST=0.0.0.0 python app.py`.
 
+## Demo pública en Render (gratis, desde GitHub)
+
+El fichero `render.yaml` de la raíz del repositorio describe el despliegue:
+
+1. Crea una cuenta en https://render.com entrando con GitHub.
+2. **New → Blueprint** y elige el repositorio `agente_normativas`.
+   Si no aparece, pulsa «Configure account» y dale acceso a ese repositorio.
+3. Render lee `render.yaml`: pulsa **Apply**. En 2-3 minutos tendrás una URL
+   `https://citacerca-demo-XXXX.onrender.com` que puedes abrir desde el móvil.
+
+Cada `git push` a la rama `claude/health-clinics-booking-platform-uo0ckk` se
+vuelve a desplegar solo. En modo demo (`CITAS_DEMO=1`) se cargan los datos de
+ejemplo si la base está vacía y «Entrar» muestra las cuentas de prueba con
+acceso en un clic.
+
+Limitaciones del plan gratuito: el servicio se duerme tras 15 minutos sin
+visitas (la primera carga después tarda unos 30-60 s) y el disco no es
+persistente: al reiniciarse o redesplegar se pierden las cuentas y fotos nuevas
+y vuelven los datos de ejemplo. Para una demo es justo lo que interesa; para uso
+real haría falta un disco persistente o una base de datos gestionada.
+
 ## Cuentas de demostración (contraseña `demo1234`)
 
 | Perfil | Email | Qué tiene de particular |

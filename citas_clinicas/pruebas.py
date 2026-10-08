@@ -229,6 +229,21 @@ class FlujoClinica(Base):
         self.assertEqual(r.status_code, 302)
 
 
+class ModoDemo(unittest.TestCase):
+    def test_siembra_si_vacia_y_muestra_cuentas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = modulo.crear_app({"BASE_DATOS": f"{tmp}/d.db", "SUBIDAS": f"{tmp}/s", "SECRET_KEY": "x",
+                                    "DEMO": True})
+            html = app.test_client().get("/entrar").get_data(as_text=True)
+            self.assertIn("Cuentas de prueba", html)
+            self.assertIn("fisio@demo.es", html)
+            # Un segundo arranque no duplica los datos.
+            modulo.crear_app({"BASE_DATOS": f"{tmp}/d.db", "SUBIDAS": f"{tmp}/s", "SECRET_KEY": "x", "DEMO": True})
+            db = modulo.conectar(f"{tmp}/d.db")
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM clinicas").fetchone()[0], 4)
+            db.close()
+
+
 class Paginas(Base):
     def test_todas_cargan(self):
         for url in ("/", "/buscar", "/clinica/1", "/clinica/2?servicio=6&semana=1", "/registro",

@@ -16,5 +16,18 @@
       <a href="{{ url_for('registro', siguiente=siguiente) }}">Paciente</a> ·
       <a href="{{ url_for('registro_clinica') }}">Clínica</a></p>
   </div>
+  {% if demo %}
+  <div class="tarjeta">
+    <h3>Cuentas de prueba</h3>
+    <p class="suave pequeno">Contraseña de todas: <b>demo1234</b>. Pulsa una para entrar con ella.</p>
+    {% for nombre, email in cuentas_demo() %}
+      <form method="post" style="margin:0 0 6px">{{ csrf() }}
+        <input type="hidden" name="email" value="{{ email }}"><input type="hidden" name="clave" value="demo1234">
+        <input type="hidden" name="siguiente" value="{{ siguiente }}">
+        <button class="secundario" style="width:100%;text-align:left">{{ nombre }} <span class="suave pequeno">· {{ email }}</span></button>
+      </form>
+    {% endfor %}
+  </div>
+  {% endif %}
 </div>
 {% endblock %}

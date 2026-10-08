@@ -467,16 +467,25 @@ def crear_app(config=None):
         MAX_CONTENT_LENGTH=4 * 1024 * 1024,
         SECRET_KEY=os.environ.get("CITAS_SECRETO") or clave_secreta(),
         CSRF=True,
+        # Modo demo pública: siembra datos de ejemplo si la base está vacía y
+        # muestra las cuentas de prueba en «Entrar».
+        DEMO=os.environ.get("CITAS_DEMO") == "1",
     )
     if config:
         app.config.update(config)
     Path(app.config["SUBIDAS"]).mkdir(parents=True, exist_ok=True)
-    iniciar_bd(app.config["BASE_DATOS"]).close()
+    db = iniciar_bd(app.config["BASE_DATOS"])
+    vacia = db.execute("SELECT COUNT(*) FROM usuarios").fetchone()[0] == 0
+    db.close()
+    if app.config["DEMO"] and vacia:
+        from datos_demo import sembrar
+        sembrar(app.config["BASE_DATOS"])
 
     app.jinja_env.filters.update(fecha_bonita=fecha_bonita, fecha_corta=fecha_corta)
     app.jinja_env.globals.update(TIPOS=TIPOS, CARACTERISTICAS=CARACTERISTICAS,
                                  ESTADOS_CITA=ESTADOS_CITA, DIAS=DIAS, COLORES=COLORES,
-                                 csrf=campo_csrf, puede_valorarse=puede_valorarse)
+                                 csrf=campo_csrf, puede_valorarse=puede_valorarse,
+                                 demo=app.config["DEMO"], cuentas_demo=cuentas_demo)
 
     @app.teardown_appcontext
     def cerrar_db(_):
@@ -511,6 +520,12 @@ def crear_app(config=None):
 
     registrar_rutas(app)
     return app
+
+
+def cuentas_demo():
+    from datos_demo import CLINICAS, PACIENTE
+    return ([("👤 Paciente · " + PACIENTE["nombre"], PACIENTE["email"])]
+            + [(f"{TIPOS[c['tipo']][1]} {c['nombre']}", c["email"]) for c in CLINICAS])
 
 
 def clave_secreta():

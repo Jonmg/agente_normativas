@@ -136,3 +136,6 @@ details summary { cursor: pointer; color: var(--primario); font-weight: 600; }
 .puntos input { display: none; }
 .puntos label { font-size: 1.6rem; color: #d0d5dd; cursor: pointer; margin: 0; }
 .puntos input:checked ~ label, .puntos label:hover, .puntos label:hover ~ label { color: #f5a524; }
+
+.banda-demo { background: #fffaeb; border-bottom: 1px solid #fedf89; color: #93370d; text-align: center;
+              font-size: .85rem; padding: 6px 16px; }
