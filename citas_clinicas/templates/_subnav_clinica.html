@@ -1,9 +1,0 @@
-<div class="fila" style="justify-content:space-between;align-items:center">
-  <h1 style="flex:1 1 auto">{{ g.clinica.nombre }}</h1>
-  <a class="boton secundario" style="flex:0 0 auto" href="{{ url_for('clinica', cid=g.clinica.id) }}">Ver mi ficha pública ↗</a>
-</div>
-<nav class="subnav">
-  {% for ruta, texto in [('panel', 'Solicitudes y agenda')] + ([('panel_huecos', 'Huecos de la semana')] if g.clinica.modo == 'franjas' else []) + [('panel_perfil', 'Ficha'), ('panel_servicios', 'Servicios'), ('panel_horario', 'Horario y bloqueos')] %}
-    <a href="{{ url_for(ruta) }}" class="{% if request.endpoint == ruta %}activo{% endif %}">{{ texto }}</a>
-  {% endfor %}
-</nav>

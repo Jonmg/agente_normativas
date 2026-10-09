@@ -1,3 +1,0 @@
-flask>=3.0
-# Solo para el despliegue (Render u otro hosting); en local basta con flask.
-gunicorn>=22.0
