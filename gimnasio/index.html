@@ -211,16 +211,20 @@ const Datos = {
       if (!db || !user) return false;
       const uid = await user.id();
       if (!uid) return false;
-      const base = `data/users/${uid}`;
-      const snap = await db.collection(`${base}/dias`).limit(1000).get();
+      // Colección privada del usuario: un documento "dia-AAAA-MM-DD" por día y otro "ajustes".
+      const snap = await db.collection(`data/users/${uid}`).limit(1000).get();
       const remotos = {};
-      snap.docs.forEach(d => { if (d.exists) remotos[d.id] = structuredClone(d.data()); });
-      const aj = await db.doc(`${base}/ajustes/principal`).get();
+      let aj = null;
+      snap.docs.forEach(d => {
+        if (!d.exists) return;
+        if (d.id.startsWith("dia-")) remotos[d.id.slice(4)] = structuredClone(d.data());
+        else if (d.id === "ajustes") aj = structuredClone(d.data());
+      });
       this.db = db; this.uid = uid; this.modo = "nube";
       // Lo que se apuntó en el dispositivo antes de conectar se sube sin pisar lo que ya hay en la cuenta.
       for (const [k, v] of Object.entries(this.dias)) if (!remotos[k] && !v.nuevo) { remotos[k] = v; this.subirDia(k, v); }
       this.dias = remotos;
-      if (aj.exists) this.ajustes = Object.assign({ nombre: "", desactivados: [] }, structuredClone(aj.data()));
+      if (aj) this.ajustes = Object.assign({ nombre: "", desactivados: [] }, aj);
       else this.subirAjustes();
       this.guardarLocal();
       return true;
@@ -235,12 +239,12 @@ const Datos = {
     if (c.enCurso) return;
     const enviar = async () => {
       c.enCurso = true;
-      while (c.pendiente) { const body = c.pendiente; c.pendiente = null; try { await this.db.doc(`data/users/${this.uid}/dias/${k}`).set(body); } catch (e) { avisoGuardado(false); } }
+      while (c.pendiente) { const body = c.pendiente; c.pendiente = null; try { await this.db.doc(`data/users/${this.uid}/dia-${k}`).set(body); } catch (e) { avisoGuardado(false); } }
       c.enCurso = false;
     };
     enviar();
   },
-  subirAjustes() { if (this.db) this.db.doc(`data/users/${this.uid}/ajustes/principal`).set(structuredClone(this.ajustes)).catch(() => avisoGuardado(false)); },
+  subirAjustes() { if (this.db) this.db.doc(`data/users/${this.uid}/ajustes`).set(structuredClone(this.ajustes)).catch(() => avisoGuardado(false)); },
   guardarDia(k) { this.dias[k].actualizado = Date.now(); this.guardarLocal(); this.subirDia(k, this.dias[k]); },
   guardarAjustes() { this.guardarLocal(); this.subirAjustes(); },
 };
