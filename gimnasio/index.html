@@ -508,6 +508,17 @@ function pintarAjustes() {
   }
   h += `</section>
     <section class="card"><h2>Semana tipo</h2><p class="muted small" style="margin:0">Lunes, miércoles y viernes: gimnasio. Martes, jueves y sábado: paseo. Domingo: descanso. Cada día puedes cambiarlo arriba en <b>Hoy</b>.</p></section>
+    <section class="card" aria-labelledby="t-copia"><h2 id="t-copia">Copia de seguridad</h2>
+      <p class="muted small" style="margin:0">${Datos.modo === "nube" ? "Tus datos ya se guardan en tu cuenta. Aun así puedes sacar una copia." : "Tus datos están solo en este móvil. Saca una copia de vez en cuando y guárdala (por ejemplo, mándatela por WhatsApp o correo)."}</p>
+      <div class="fila">
+        ${window.claude ? "" : `<button class="btn peq" data-descargar>Descargar copia</button>`}
+        <button class="btn sec peq" data-copiar>Copiar copia como texto</button>
+      </div>
+      <label class="campo" for="importarFichero">Restaurar desde un fichero de copia<input type="file" id="importarFichero" accept=".json,application/json,text/plain" style="font-size:1rem"></label>
+      <label class="campo" for="importarTexto">…o pega aquí el texto de la copia<textarea id="importarTexto" rows="3" style="font:inherit;font-size:.9rem;color:var(--ink);background:var(--bg);border:2px solid var(--line);border-radius:10px;padding:8px;width:100%"></textarea></label>
+      <button class="btn sec peq" data-restaurar style="justify-self:start">Restaurar copia pegada</button>
+      <p class="small" id="msgCopia" role="status" style="margin:0"></p>
+    </section>
     <section class="card"><h2>Importante</h2><p class="muted small" style="margin:0">Esta libreta te ayuda a ser constante, pero no sustituye al médico ni al entrenador. Los pesos y tiempos iniciales son orientativos: ajústalos a lo que hacías con el entrenador. Ante cualquier síntoma raro, para.</p></section>
   </div>`;
   $("#vista").innerHTML = h;
@@ -526,8 +537,41 @@ document.querySelector("nav.tabs").addEventListener("click", ev => {
   try { localStorage.setItem(LS + "-tab", pestaña); } catch (e) {}
 });
 
+/* ---------- Copia de seguridad ---------- */
+function textoCopia() { return JSON.stringify({ app: "cuaderno-fuerza", version: 1, exportado: new Date().toISOString(), ajustes: Datos.ajustes, dias: Object.fromEntries(Object.entries(Datos.dias).filter(([, d]) => !d.nuevo)) }); }
+function msgCopia(t, mal) { const el = $("#msgCopia"); if (el) { el.textContent = t; el.style.color = mal ? "var(--warn)" : "var(--ok)"; } }
+// Mezcla una copia con lo que ya hay: por cada día gana la versión modificada más tarde.
+function restaurar(texto) {
+  let j;
+  try { j = JSON.parse(texto); } catch (e) { msgCopia("Ese texto no es una copia válida. Copia el texto entero, desde la primera llave hasta la última.", true); return; }
+  if (!j || j.app !== "cuaderno-fuerza" || typeof j.dias !== "object") { msgCopia("Ese fichero no es una copia del Cuaderno de Fuerza.", true); return; }
+  let n = 0;
+  for (const [k, d] of Object.entries(j.dias)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(k) || !d || typeof d !== "object") continue;
+    const actual = Datos.dias[k];
+    if (!actual || actual.nuevo || (d.actualizado || 0) > (actual.actualizado || 0)) { Datos.dias[k] = d; Datos.guardarLocal(); Datos.subirDia(k, d); n++; }
+  }
+  if (j.ajustes && typeof j.ajustes === "object") { Datos.ajustes = Object.assign({ nombre: "", desactivados: [] }, j.ajustes); Datos.guardarAjustes(); }
+  pintar();
+  msgCopia(`Copia restaurada: ${n} día${n === 1 ? "" : "s"} recuperado${n === 1 ? "" : "s"}.`);
+}
+
 $("#vista").addEventListener("click", ev => {
   const b = ev.target.closest("button"); if (!b) return;
+  if ("descargar" in b.dataset) {
+    const url = URL.createObjectURL(new Blob([textoCopia()], { type: "application/json" }));
+    const a = document.createElement("a"); a.href = url; a.download = `cuaderno-fuerza-${HOY}.json`;
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    msgCopia("Copia descargada. Guárdala fuera del móvil, por ejemplo mandándotela por correo.");
+    return;
+  }
+  if ("copiar" in b.dataset) {
+    const t = textoCopia(), area = $("#importarTexto");
+    const plan = () => { area.value = t; area.select(); msgCopia("No se pudo copiar solo: el texto está seleccionado en el recuadro, cópialo a mano.", true); };
+    try { navigator.clipboard.writeText(t).then(() => msgCopia("Copia guardada en el portapapeles. Pégala en un mensaje para ti."), plan); } catch (e) { plan(); }
+    return;
+  }
+  if ("restaurar" in b.dataset) { const t = $("#importarTexto").value.trim(); if (t) restaurar(t); else msgCopia("Pega primero el texto de la copia en el recuadro.", true); return; }
   const d = Datos.dias[HOY];
   if (b.dataset.energia) { d.energia = Number(b.dataset.energia); tocar(HOY); }
   else if ("alerta" in b.dataset) { d.alerta = !d.alerta; tocar(HOY); }
@@ -574,6 +618,7 @@ $("#vista").addEventListener("change", ev => {
     if (hoy && hoy.tipo === "gym" && !hoy.ejercicios.some(e => e.hecho)) hoy.ejercicios = generarSesion(HOY);
   }
   else if (t.id === "selMaquina") { sessionSel = t.value; pintar(); }
+  else if (t.id === "importarFichero" && t.files[0]) { t.files[0].text().then(restaurar); }
 });
 
 /* ---------- Arranque ---------- */
